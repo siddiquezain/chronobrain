@@ -1,0 +1,211 @@
+"""
+telemetry_simulator.py — Deterministic seeded telemetry generator for ChronoPace.
+
+Produces TelemetryInput and RivalObservation sequences for the Core Demo
+Scenarios (A, B, C) and test fixtures. Every consumer of this module is
+telemetry-source-agnostic — the same Pydantic models can be populated from
+real FastF1 data later without changing any downstream code.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import numpy as np
+from pydantic import BaseModel, Field
+
+
+class TelemetryInput(BaseModel):
+    """
+    Single-lap telemetry snapshot from our own car.
+    All energy values in MJ, gaps in seconds, speed in km/h.
+    """
+
+    lap_number: int = Field(..., ge=1, description="Current lap number")
+    current_soc_mj: float = Field(..., ge=0.0, le=9.0, description="Current battery SoC in MJ")
+    lap_start_soc_mj: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=9.0,
+        description="SoC at start of this lap (enables delta-SoC swing check; None = skip check)",
+    )
+    lap_energy_deployed_mj: float = Field(
+        ...,
+        ge=0.0,
+        description="MGU-K energy deployed so far this lap (MJ). Art. 5.4.10 tracks this.",
+    )
+    gap_to_car_ahead_s: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Gap to car ahead at the detection point (seconds). None if no car ahead.",
+    )
+    overtake_qualified_last_lap: bool = Field(
+        False,
+        description=(
+            "True only if this car was within the 1.0s gap threshold on the immediately preceding "
+            "lap. Use-it-or-lose-it: the calling orchestrator must not carry True forward more "
+            "than one lap."
+        ),
+    )
+    speed_kmh: float = Field(..., ge=0.0, description="Current speed in km/h")
+    total_laps: int = Field(..., ge=1, description="Total laps in the race")
+
+
+class RivalObservation(BaseModel):
+    """
+    Kinematic observables for a rival car, derived from FIA timing/GPS data.
+    All four signals are publicly available to every team on track.
+    """
+
+    terminal_speed_kmh: float = Field(..., ge=0.0, description="Peak straight-line speed (km/h)")
+    clipping_point_fraction: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Fraction along straight where speed trace flattens (0=early, 1=late)",
+    )
+    corner_exit_accel_g: float = Field(
+        ...,
+        ge=0.0,
+        description="Longitudinal acceleration on corner exit (g). Higher deployment → harder exit.",
+    )
+    sector_delta_s: float = Field(
+        ...,
+        description=(
+            "Rival's sector time vs. their own rolling baseline (seconds). "
+            "Negative = faster than baseline."
+        ),
+    )
+
+
+# Scenario presets — initial conditions that produce the expected demo outcomes
+SCENARIO_PRESETS: dict[str, dict] = {
+    # Normal race — balanced, no strong overtake
+    "A": {
+        "initial_soc_mj": 5.5,
+        "rival_initial_soc_mj": 5.0,
+        "gap_to_car_ahead_s": 2.5,
+        "rival_terminal_speed_kmh": 315.0,
+    },
+    # Strong overtake window — high SoC, small gap, high closing speed
+    "B": {
+        "initial_soc_mj": 7.2,
+        "rival_initial_soc_mj": 2.5,
+        "gap_to_car_ahead_s": 0.6,
+        "rival_terminal_speed_kmh": 308.0,
+    },
+    # Low energy — opportunity exists but SoC is depleted
+    "C": {
+        "initial_soc_mj": 1.8,
+        "rival_initial_soc_mj": 2.0,
+        "gap_to_car_ahead_s": 0.7,
+        "rival_terminal_speed_kmh": 310.0,
+    },
+    # Defensive — car behind approaching quickly
+    "D": {
+        "initial_soc_mj": 5.0,
+        "rival_initial_soc_mj": 7.5,
+        "gap_to_car_ahead_s": 3.0,
+        "rival_terminal_speed_kmh": 325.0,
+    },
+    # Illegal candidate — deployment already over cap
+    "E": {
+        "initial_soc_mj": 4.0,
+        "rival_initial_soc_mj": 4.0,
+        "gap_to_car_ahead_s": 0.8,
+        "rival_terminal_speed_kmh": 318.0,
+    },
+}
+
+
+class TelemetrySimulator:
+    """
+    Deterministic, seeded generator for TelemetryInput and RivalObservation sequences.
+
+    The only planned telemetry source for the hackathon demo.
+    Replace with a real FastF1 adapter by pointing the same Pydantic models at real
+    data — no downstream code changes required.
+    """
+
+    def __init__(self, scenario: str = "B", seed: int = 42, total_laps: int = 50):
+        if scenario not in SCENARIO_PRESETS:
+            raise ValueError(f"Unknown scenario '{scenario}'. Choose from {list(SCENARIO_PRESETS)}")
+        self.scenario = scenario
+        self.total_laps = total_laps
+        self._rng = np.random.default_rng(seed)
+        self._preset = SCENARIO_PRESETS[scenario]
+
+        self._lap = 1
+        self._soc_mj = self._preset["initial_soc_mj"]
+        self._lap_start_soc_mj = self._soc_mj
+        self._lap_energy_deployed_mj = 0.0
+        self._overtake_qualified_last_lap = False
+        self._rival_soc_mj = self._preset["rival_initial_soc_mj"]
+
+    def _harvest_this_lap(self) -> float:
+        # ponytail: illustrative harvest model, not validated against real PU data
+        return float(np.clip(1.5 + self._rng.normal(0, 0.15), 0.5, 2.5))
+
+    def _deploy_this_lap(self) -> float:
+        # ponytail: illustrative deployment model
+        return float(np.clip(1.8 + self._rng.normal(0, 0.2), 0.5, 3.5))
+
+    def next_lap(self) -> tuple[TelemetryInput, RivalObservation]:
+        """Advance one lap and return (TelemetryInput, RivalObservation)."""
+        harvested = self._harvest_this_lap()
+        deployed = self._deploy_this_lap()
+        self._soc_mj = float(np.clip(self._soc_mj + harvested - deployed, 0.0, 9.0))
+        self._lap_energy_deployed_mj = deployed
+
+        gap_base = self._preset.get("gap_to_car_ahead_s", 2.0)
+        gap = float(np.clip(gap_base + self._rng.normal(0, 0.1), 0.1, 5.0))
+
+        qualified = gap <= 1.0
+        last_qualified = self._overtake_qualified_last_lap
+        self._overtake_qualified_last_lap = qualified
+
+        self._rival_soc_mj = float(
+            np.clip(self._rival_soc_mj + self._rng.normal(-0.5, 0.3), 0.0, 9.0)
+        )
+        rival_obs = self._build_rival_observation()
+
+        telemetry = TelemetryInput(
+            lap_number=self._lap,
+            current_soc_mj=round(self._soc_mj, 3),
+            lap_start_soc_mj=round(self._lap_start_soc_mj, 3),
+            lap_energy_deployed_mj=round(self._lap_energy_deployed_mj, 3),
+            gap_to_car_ahead_s=round(gap, 3),
+            overtake_qualified_last_lap=last_qualified,
+            speed_kmh=float(np.clip(280.0 + self._rng.normal(0, 10), 200, 360)),
+            total_laps=self.total_laps,
+        )
+
+        self._lap_start_soc_mj = self._soc_mj
+        self._lap += 1
+        return telemetry, rival_obs
+
+    def _build_rival_observation(self) -> RivalObservation:
+        soc_fraction = self._rival_soc_mj / 9.0
+        base_speed = self._preset.get("rival_terminal_speed_kmh", 315.0)
+        terminal_speed = float(
+            np.clip(base_speed + soc_fraction * 15.0 + self._rng.normal(0, 5.0), 260.0, 360.0)
+        )
+        clipping = float(
+            np.clip(0.3 + soc_fraction * 0.5 + self._rng.normal(0, 0.08), 0.0, 1.0)
+        )
+        accel_g = float(
+            np.clip(1.0 + soc_fraction * 0.3 + self._rng.normal(0, 0.15), 0.3, 2.0)
+        )
+        sector_delta = float(soc_fraction * (-0.4) + self._rng.normal(0, 0.12))
+        return RivalObservation(
+            terminal_speed_kmh=round(terminal_speed, 2),
+            clipping_point_fraction=round(clipping, 4),
+            corner_exit_accel_g=round(accel_g, 4),
+            sector_delta_s=round(sector_delta, 4),
+        )
+
+    def generate_sequence(
+        self, n_laps: int
+    ) -> list[tuple[TelemetryInput, RivalObservation]]:
+        """Generate a sequence of (TelemetryInput, RivalObservation) for n laps."""
+        return [self.next_lap() for _ in range(n_laps)]
