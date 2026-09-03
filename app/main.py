@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import health, race, energy, overtake, strategy, simulation
+from app.api.routes.v1 import decision as v1_decision
 from app.api.websocket import websocket_endpoint
 from app.core.logging import setup_logging
 
@@ -33,6 +34,7 @@ app.include_router(energy.router)
 app.include_router(overtake.router)
 app.include_router(strategy.router)
 app.include_router(simulation.router)
+app.include_router(v1_decision.router)
 
 # WebSocket
 app.add_api_websocket_route("/ws", websocket_endpoint)
