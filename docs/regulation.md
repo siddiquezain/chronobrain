@@ -53,7 +53,7 @@ decision-*policy*, flagged `MODEL_ASSUMPTION` in code comments:
 - `_DEFEND_GAP_S = 1.0` (engine.py) — rearward gap under which PUSH-to-defend is justified.
 - `_HARVEST_PER_LAP = 0.35` (opportunity_engine.py), `harvest_per_lap_mj = 0.3` (actions.py) — modelled per-lap energy recovery for a non-attacking car.
 - `_p_defend(...)` (engine.py) — deterministic scalar P(rival defends) from rival SoC bucket + gap trend + estimate uncertainty. A small statistical input to the planner, **not** a behavioural model.
-- `ReplayEnergyModel` (normalizer.py) — turns a FastF1 lap's throttle/brake trace into a modelled SoC path, because **F1 publishes no ERS state of charge**. Every replayed lap carries `energy_is_modeled = True`.
+- `ReplayEnergyModel` (normalizer.py) — turns a FastF1 lap's throttle/brake trace into a modelled SoC path, because **F1 publishes no ERS state of charge**. Every replayed lap carries `energy_is_modeled = True`. For historical replay it uses `next_soc`: SoC mean-reverts to `nominal_soc_mj = 4.5` and dips/recovers with each lap's throttle/brake intensity **relative to the driver's own rolling baseline of earlier laps** (causal). The 2024 cars did not run under the 2026 energy budget — this is a `MODEL_ASSUMPTION` layered on real 2024 telemetry (see `docs/historical-replay.md`).
 
 ## What still needs a human check
 

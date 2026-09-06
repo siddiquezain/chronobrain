@@ -35,12 +35,26 @@ _SOC_CEIL_MJ = _GATE.max_deployment_per_lap_mj  # 9.0 — Stack A clamps SoC to 
 @dataclass(frozen=True)
 class ReplayEnergyModel:
     """
-    Turns a lap's throttle/brake trace into a modelled SoC path. MODEL_ASSUMPTION,
-    not a regulation or a measurement — see docs/regulation.md. Deterministic:
+    Turns a lap's throttle/brake trace into a modelled SoC path. **MODEL_ASSUMPTION**,
+    not a regulation and NOT a measurement — real F1 telemetry carries no ERS SoC,
+    and the 2024 cars did not run ChronoPace's 2026 energy budget. Deterministic:
     same samples in, same numbers out.
+
+    Two modes:
+      * `lap_deploy_mj` / `lap_harvest_mj` — the original absolute model (kept for
+        callers that use it directly).
+      * `next_soc` — a causal, mean-reverting model: SoC pulls toward a nominal
+        level and dips/recovers with how hard THIS lap was worked relative to the
+        driver's OWN rolling baseline (which only ever contains earlier laps). This
+        is what the historical replay uses so SoC stays in a plausible band instead
+        of draining to zero on a flat-out circuit like Monza.
     """
 
-    start_soc_mj: float = 5.0
+    start_soc_mj: float = 4.5
+    nominal_soc_mj: float = 4.5
+    reversion: float = 0.12           # per-lap pull toward nominal
+    intensity_gain_mj: float = 3.0    # SoC swing per unit of relative work intensity
+    floor_mj: float = 0.3
     # Full-throttle lap would spend this; scaled by mean throttle fraction.
     max_deploy_per_lap_mj: float = 2.6
     # Full-braking-share lap would recover this; scaled by mean brake fraction.
@@ -51,6 +65,19 @@ class ReplayEnergyModel:
 
     def lap_harvest_mj(self, mean_brake: float) -> float:
         return round(self.max_harvest_per_lap_mj * _clip01(mean_brake), 4)
+
+    def next_soc(
+        self,
+        prev_soc: float,
+        mean_throttle: float,
+        mean_brake: float,
+        throttle_baseline: float,
+        brake_baseline: float,
+    ) -> float:
+        rel_intensity = (mean_throttle - throttle_baseline) - 0.5 * (mean_brake - brake_baseline)
+        pull = self.reversion * (self.nominal_soc_mj - prev_soc)
+        soc = prev_soc + pull - self.intensity_gain_mj * rel_intensity
+        return _clip(soc, self.floor_mj, 9.0)
 
 
 def _clip01(x: float) -> float:
@@ -81,13 +108,17 @@ def condense_lap(
     gap_to_car_behind_s: Optional[float] = None,
     energy_model: Optional[ReplayEnergyModel] = None,
     rival_sector_baseline_s: Optional[float] = None,
+    throttle_baseline: Optional[float] = None,
+    brake_baseline: Optional[float] = None,
     source_detail: str = "",
 ) -> NormalizedLap:
     """
     Reduce one lap's sub-lap samples (our car + rival) to a NormalizedLap.
 
     `prev_soc_mj` threads the modelled SoC forward lap-to-lap (None on the first
-    lap -> energy_model.start_soc_mj).
+    lap -> energy_model.start_soc_mj). When `throttle_baseline` / `brake_baseline`
+    are supplied (rolling means of EARLIER laps only), the mean-reverting
+    `next_soc` model is used instead of the absolute one.
     """
     if not our_samples:
         raise ValueError(f"condense_lap: no samples for our car on lap {lap}")
@@ -100,7 +131,12 @@ def condense_lap(
     lap_start_soc = model.start_soc_mj if prev_soc_mj is None else prev_soc_mj
     deployed = model.lap_deploy_mj(mean_throttle)
     harvested = model.lap_harvest_mj(mean_brake)
-    end_soc = round(_clip(lap_start_soc + harvested - deployed, 0.0, _SOC_CEIL_MJ), 4)
+    if throttle_baseline is not None and brake_baseline is not None:
+        end_soc = round(model.next_soc(
+            lap_start_soc, mean_throttle, mean_brake, throttle_baseline, brake_baseline
+        ), 4)
+    else:
+        end_soc = round(_clip(lap_start_soc + harvested - deployed, 0.0, _SOC_CEIL_MJ), 4)
 
     our_speed = max(s.speed_kmh for s in our_samples)
     drs_open = any(bool(s.drs) for s in our_samples if s.drs is not None) or None

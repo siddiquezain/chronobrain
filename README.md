@@ -116,11 +116,24 @@ curl -s -X POST localhost:8000/api/v1/demo/rival-trace \
   -H 'content-type: application/json' | jq '.steps[-1]'
 ```
 
+## Historical race replay
+
+`/api/v1/replay/*` — replay a real F1 race (first: **2024 Italian GP, LEC vs PIA**)
+through the same pipeline, lap by lap, using only data available up to the current
+lap. Needs `pip install -r requirements-fastf1.txt`. See **[docs/historical-replay.md](docs/historical-replay.md)**.
+
+```bash
+curl -s -X POST localhost:8000/api/v1/replay/historical \
+  -d '{"race":"2024_italian_gp","start_lap":1,"end_lap":53,"seed":42}' \
+  -H 'content-type: application/json' | jq '.laps[1].decision'
+```
+
 ## Docs
 
 - [docs/architecture.md](docs/architecture.md) — the pipeline and the LLM boundary
 - [docs/api-contract.md](docs/api-contract.md) — every endpoint and the snapshot shape
 - [docs/demo.md](docs/demo.md) — the interactive demo + how to demonstrate the rival estimator
+- [docs/historical-replay.md](docs/historical-replay.md) — real-race replay, and where hindsight is prevented
 - [docs/methodology.md](docs/methodology.md) — the algorithms
 - [docs/regulation.md](docs/regulation.md) — every regulatory constant + provenance
 

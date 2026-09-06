@@ -26,6 +26,12 @@ from app.data.samples import NormalizedLap, TelemetrySample
 _DEFAULT_CACHE = ".fastf1_cache"
 
 
+class FastF1Unavailable(RuntimeError):
+    """`fastf1` is not installed, or the historical session could not be loaded
+    (offline / cache miss / unknown session). Raised so callers fail clearly
+    instead of fabricating data."""
+
+
 # ---------------------------------------------------------------------------
 # Pure helper — no fastf1 required (tests drive this with a synthetic DataFrame)
 # ---------------------------------------------------------------------------
@@ -85,6 +91,14 @@ def dataframe_to_samples(df, lap: int) -> List[TelemetrySample]:
 # ---------------------------------------------------------------------------
 # FastF1-backed loader (lazy import)
 # ---------------------------------------------------------------------------
+def fastf1_available() -> bool:
+    try:
+        import fastf1  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def load_replay(
     *,
     year: int,
@@ -96,26 +110,51 @@ def load_replay(
     cache_dir: str = _DEFAULT_CACHE,
     energy_model: Optional[ReplayEnergyModel] = None,
     label: Optional[str] = None,
+    scheduled_laps: Optional[int] = None,
 ) -> List[NormalizedLap]:
     """
-    Load a historical session and return NormalizedLaps for `our_driver`, with
-    `rival_driver`'s kinematics attached as particle-filter observations.
+    Load a historical session and return causal per-lap `NormalizedLap`s for
+    `our_driver`, with `rival_driver`'s kinematics attached as particle-filter
+    observations.
 
-    `event` is anything FastF1 accepts (round number or GP name). `laps` limits
-    which lap numbers to return (default: all laps both drivers completed).
+    ANTI-HINDSIGHT: every field on lap N is derived from lap N alone plus rolling
+    statistics of laps < N (throttle/brake baselines, rival sector-delta baseline,
+    cumulative gap). `scheduled_laps` (the pre-race race distance, a constant from
+    the race registry) is used for `total_laps` rather than the actually-completed
+    count. Downstream, `run_decision(provider, lap=N)` censors again to laps <= N.
+
+    Raises `FastF1Unavailable` if `fastf1` is missing or the session cannot load.
     """
-    import fastf1  # lazy — see module docstring
+    try:
+        import fastf1  # lazy — see module docstring
+    except Exception as exc:  # ModuleNotFoundError, or a broken install
+        raise FastF1Unavailable(
+            "the `fastf1` package is not installed. Run `pip install -r requirements-fastf1.txt`."
+        ) from exc
 
     import os
 
-    os.makedirs(cache_dir, exist_ok=True)
-    fastf1.Cache.enable_cache(cache_dir)
-
-    ses = fastf1.get_session(year, event, session)
-    ses.load(telemetry=True, laps=True, weather=False, messages=False)
+    try:
+        try:
+            fastf1.set_log_level("WARNING")  # quiet the per-request INFO spam
+        except Exception:
+            pass
+        os.makedirs(cache_dir, exist_ok=True)
+        fastf1.Cache.enable_cache(cache_dir)
+        ses = fastf1.get_session(year, event, session)
+        ses.load(telemetry=True, laps=True, weather=False, messages=False)
+    except Exception as exc:
+        raise FastF1Unavailable(
+            f"could not load {year} {event} {session} from FastF1 "
+            f"(offline, cache miss, or unknown session): {exc}"
+        ) from exc
 
     our_samples = _driver_lap_samples(ses, our_driver)
     rival_samples = _driver_lap_samples(ses, rival_driver)
+    if not our_samples or not rival_samples:
+        raise FastF1Unavailable(
+            f"no telemetry for {our_driver!r} and/or {rival_driver!r} in {year} {event} {session}"
+        )
     gap = _gap_to_rival_s(ses, our_driver, rival_driver)
 
     lap_numbers = sorted(set(our_samples) & set(rival_samples))
@@ -123,16 +162,25 @@ def load_replay(
         wanted = set(laps)
         lap_numbers = [ln for ln in lap_numbers if ln in wanted]
     if not lap_numbers:
-        raise RuntimeError(
-            f"No overlapping laps for {our_driver} / {rival_driver} in {year} {event} {session}"
+        raise FastF1Unavailable(
+            f"no overlapping laps for {our_driver} / {rival_driver} in {year} {event} {session}"
         )
-    total_laps = int(ses.total_laps or lap_numbers[-1])
+    total_laps = int(scheduled_laps or ses.total_laps or lap_numbers[-1])
 
     model = energy_model or ReplayEnergyModel()
-    src = label or f"{year} {getattr(ses, 'event', {}).get('EventName', event)} {session}, {our_driver} vs {rival_driver}"
+    ev_name = event
+    try:
+        ev_name = ses.event["EventName"]
+    except Exception:
+        pass
+    src = label or f"{year} {ev_name} {session}, {our_driver} vs {rival_driver}"
 
-    # rolling baseline for the rival sector-delta signal
+    # rolling (causal) baselines
     rival_lap_times = _rival_lap_time_baseline(rival_samples)
+    our_thr = {ln: _mean_channel(s, "throttle") for ln, s in our_samples.items()}
+    our_brk = {ln: _mean_channel(s, "brake") for ln, s in our_samples.items()}
+    thr_base = _rolling_mean(our_thr)
+    brk_base = _rolling_mean(our_brk)
 
     out: List[NormalizedLap] = []
     prev_soc: Optional[float] = None
@@ -147,10 +195,28 @@ def load_replay(
             gap_to_car_ahead_s=gap.get(ln),
             energy_model=model,
             rival_sector_baseline_s=rival_lap_times.get(ln),
+            throttle_baseline=thr_base.get(ln, our_thr.get(ln)),
+            brake_baseline=brk_base.get(ln, our_brk.get(ln)),
             source_detail=src,
         )
         prev_soc = nl.our_soc_mj
         out.append(nl)
+    return out
+
+
+def _mean_channel(samples: List[TelemetrySample], attr: str) -> float:
+    vals = [getattr(s, attr) for s in samples if getattr(s, attr) is not None]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _rolling_mean(by_lap: Dict[int, float]) -> Dict[int, float]:
+    """lap -> mean of ALL EARLIER laps' values (causal; no value for the first lap)."""
+    out: Dict[int, float] = {}
+    seen: List[float] = []
+    for ln in sorted(by_lap):
+        if seen:
+            out[ln] = sum(seen) / len(seen)
+        seen.append(by_lap[ln])
     return out
 
 
