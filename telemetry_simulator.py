@@ -139,13 +139,39 @@ class TelemetrySimulator:
     data — no downstream code changes required.
     """
 
-    def __init__(self, scenario: str = "B", seed: int = 42, total_laps: int = 50):
+    # Preset keys a caller may override for the interactive demo. Everything else
+    # about the scenario stays fixed.
+    OVERRIDABLE = {
+        "initial_soc_mj",
+        "rival_initial_soc_mj",
+        "gap_to_car_ahead_s",
+        "gap_to_car_behind_s",
+        "rival_terminal_speed_kmh",
+        "lap_energy_deployed_mj",
+        "noise_scale",
+    }
+
+    def __init__(
+        self,
+        scenario: str = "B",
+        seed: int = 42,
+        total_laps: int = 50,
+        preset_overrides: dict | None = None,
+    ):
         if scenario not in SCENARIO_PRESETS:
             raise ValueError(f"Unknown scenario '{scenario}'. Choose from {list(SCENARIO_PRESETS)}")
         self.scenario = scenario
         self.total_laps = total_laps
         self._rng = np.random.default_rng(seed)
-        self._preset = SCENARIO_PRESETS[scenario]
+
+        overrides = {
+            k: v for k, v in (preset_overrides or {}).items()
+            if k in self.OVERRIDABLE and v is not None
+        }
+        self._preset = {**SCENARIO_PRESETS[scenario], **overrides}
+        # `noise_scale` multiplies the RIVAL observation noise only (the signal the
+        # estimator sees). 1.0 = default; >1 = noisier telemetry -> a wider posterior.
+        self._noise_scale = max(0.0, float(self._preset.get("noise_scale", 1.0)))
 
         self._lap = 1
         self._soc_mj = self._preset["initial_soc_mj"]
@@ -153,6 +179,12 @@ class TelemetrySimulator:
         self._lap_energy_deployed_mj = 0.0
         self._overtake_qualified_last_lap = False
         self._rival_soc_mj = self._preset["rival_initial_soc_mj"]
+
+        # HIDDEN GROUND TRUTH — the true rival SoC at the end of each lap. Appended
+        # by next_lap(). Exists ONLY so a demo/validation layer can score the
+        # estimator; it is never placed in TelemetryInput / RivalObservation and
+        # never reaches the decision engine.
+        self.rival_soc_ground_truth: list[float] = []
 
     def _harvest_this_lap(self) -> float:
         # ponytail: illustrative harvest model, not validated against real PU data
@@ -193,9 +225,10 @@ class TelemetrySimulator:
         self._rival_soc_mj = float(np.clip(
             self._rival_soc_mj
             + 0.15 * (rival_target - self._rival_soc_mj)
-            + self._rng.normal(-0.05, 0.28),
+            + self._rng.normal(-0.05, 0.28 * self._noise_scale),
             0.0, 9.0,
         ))
+        self.rival_soc_ground_truth.append(round(self._rival_soc_mj, 4))
         rival_obs = self._build_rival_observation()
 
         gap_behind = self._preset.get("gap_to_car_behind_s")
@@ -218,16 +251,17 @@ class TelemetrySimulator:
     def _build_rival_observation(self) -> RivalObservation:
         soc_fraction = self._rival_soc_mj / 9.0
         base_speed = self._preset.get("rival_terminal_speed_kmh", 315.0)
+        ns = self._noise_scale
         terminal_speed = float(
-            np.clip(base_speed + soc_fraction * 15.0 + self._rng.normal(0, 5.0), 260.0, 360.0)
+            np.clip(base_speed + soc_fraction * 15.0 + self._rng.normal(0, 5.0 * ns), 260.0, 360.0)
         )
         clipping = float(
-            np.clip(0.3 + soc_fraction * 0.5 + self._rng.normal(0, 0.08), 0.0, 1.0)
+            np.clip(0.3 + soc_fraction * 0.5 + self._rng.normal(0, 0.08 * ns), 0.0, 1.0)
         )
         accel_g = float(
-            np.clip(1.0 + soc_fraction * 0.3 + self._rng.normal(0, 0.15), 0.3, 2.0)
+            np.clip(1.0 + soc_fraction * 0.3 + self._rng.normal(0, 0.15 * ns), 0.3, 2.0)
         )
-        sector_delta = float(soc_fraction * (-0.4) + self._rng.normal(0, 0.12))
+        sector_delta = float(soc_fraction * (-0.4) + self._rng.normal(0, 0.12 * ns))
         return RivalObservation(
             terminal_speed_kmh=round(terminal_speed, 2),
             clipping_point_fraction=round(clipping, 4),

@@ -25,13 +25,16 @@ byte-identical snapshot (excluding `meta.generated_at`).
 """
 
 from app.decision.config import DecisionConfig
-from app.decision.engine import run_decision, run_scenario
+from app.decision.context import DecisionContext
+from app.decision.engine import run_decision, run_pipeline, run_scenario
 from app.decision.outcome_log import OutcomeLog
 from app.decision.snapshot import DecisionSnapshot
 
 __all__ = [
     "DecisionConfig",
+    "DecisionContext",
     "run_decision",
+    "run_pipeline",
     "run_scenario",
     "DecisionSnapshot",
     "OutcomeLog",

@@ -81,8 +81,10 @@ class DecisionContext:
     wait_n: int = 0
     confidence_result: Optional[ConfidenceGateResult] = None
 
-    # planner instance retained so the confidence gate can pull raw MC samples
+    # instances retained for diagnostics: the confidence gate pulls raw MC samples
+    # from the planner; the demo/validation layer reads the estimator's posterior.
     _planner: object = None
+    _estimator: object = None
 
     # fusion outputs
     final_mode: Optional[str] = None

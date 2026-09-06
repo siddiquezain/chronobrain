@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.data.providers import FASTF1_AVAILABLE, build_provider
 from app.decision import DecisionConfig, DecisionSnapshot, run_decision
+from app.demo.models import InputOverrides
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["v1"])
@@ -42,6 +43,12 @@ class DecisionRequest(BaseModel):
     total_laps: int = 50
     lap: Optional[int] = Field(None, description="Target lap (default: provider's last lap)")
     with_narrative: bool = Field(False, description="Also fill snapshot.narrative via the LLM/fallback")
+    overrides: Optional[InputOverrides] = Field(
+        None,
+        description="Manual race-input overrides for the synthetic simulator (our SoC, hidden "
+        "rival SoC, gap, rival terminal speed, deployment, telemetry noise). The engine still "
+        "computes the recommendation. Ground truth is never returned by this endpoint.",
+    )
     fastf1: Optional[FastF1Spec] = None
 
 
@@ -66,8 +73,11 @@ def decision(req: DecisionRequest) -> DecisionSnapshot:
                 "fastf1", seed=req.seed, fastf1_kwargs=req.fastf1.model_dump()
             )
         else:
+            ov = req.overrides
             provider = build_provider(
-                "synthetic", scenario=req.scenario, seed=req.seed, total_laps=req.total_laps
+                "synthetic", scenario=req.scenario, seed=req.seed, total_laps=req.total_laps,
+                preset_overrides=(ov.preset_overrides() if ov else None),
+                rival_obs_dropout=(ov.rival_obs_dropout or 0.0) if ov else 0.0,
             )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc

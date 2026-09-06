@@ -14,11 +14,16 @@ All four observables are derived from publicly available FIA timing/GPS data.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 from pydantic import BaseModel, Field
+
+
+def _norm_cdf(z: float) -> float:
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 # One-way import: constants only, never behavior
 from rule_gate import GateConfig
@@ -87,6 +92,19 @@ class RivalSocEstimate(BaseModel):
         ..., ge=0, description="Number of observations used to build this estimate"
     )
 
+    def bucket_distribution(self, low_edge_mj: float, high_edge_mj: float) -> dict:
+        """P(LOW / MEDIUM / HIGH) from the Gaussian summary of the posterior."""
+        std = max(self.std_soc_mj, 1e-6)
+        p_low = _norm_cdf((low_edge_mj - self.mean_soc_mj) / std)
+        p_high = 1.0 - _norm_cdf((high_edge_mj - self.mean_soc_mj) / std)
+        p_med = max(0.0, 1.0 - p_low - p_high)
+        total = p_low + p_med + p_high
+        return {"low": p_low / total, "medium": p_med / total, "high": p_high / total}
+
+    def bucket(self, low_edge_mj: float, high_edge_mj: float) -> str:
+        d = self.bucket_distribution(low_edge_mj, high_edge_mj)
+        return max(d, key=d.get).upper()
+
 
 class RivalStateEstimator:
     """
@@ -110,6 +128,7 @@ class RivalStateEstimator:
         self._particles = self._rng.uniform(cfg.soc_min_mj, cfg.soc_max_mj, cfg.n_particles)
         self._weights = np.ones(cfg.n_particles) / cfg.n_particles
         self._n_observations = 0
+        self._last_observation: Optional[dict] = None  # diagnostics only
 
     def predict(self) -> None:
         """Advance particle SoC estimates by one lap using the drift model."""
@@ -176,6 +195,12 @@ class RivalStateEstimator:
             self._weights = w / w_sum
 
         self._n_observations += 1
+        self._last_observation = {
+            "terminal_speed_kmh": round(float(observation.terminal_speed_kmh), 3),
+            "clipping_point_fraction": round(float(observation.clipping_point_fraction), 4),
+            "corner_exit_accel_g": round(float(observation.corner_exit_accel_g), 4),
+            "sector_delta_s": round(float(observation.sector_delta_s), 4),
+        }
         self._maybe_resample()
 
     def _maybe_resample(self) -> None:
@@ -214,3 +239,37 @@ class RivalStateEstimator:
             std_soc_mj=round(std, 4),
             n_observations=self._n_observations,
         )
+
+    def posterior_summary(self, n_bins: int = 12) -> dict:
+        """
+        Compact, serializable view of the particle posterior — for a demo/debug
+        visualization. NOT thousands of particles: weighted percentiles + a small
+        histogram. Deterministic given the filter's state.
+        """
+        cfg = self.config
+        order = np.argsort(self._particles)
+        p_sorted = self._particles[order]
+        w_sorted = self._weights[order]
+        cum = np.cumsum(w_sorted)
+
+        def wq(q: float) -> float:
+            return round(float(np.interp(q, cum, p_sorted)), 4)
+
+        edges = np.linspace(cfg.soc_min_mj, cfg.soc_max_mj, n_bins + 1)
+        idx = np.clip(np.digitize(self._particles, edges) - 1, 0, n_bins - 1)
+        counts = np.zeros(n_bins)
+        np.add.at(counts, idx, self._weights)
+
+        ess = float(1.0 / np.sum(self._weights**2))
+        return {
+            "n_particles": int(cfg.n_particles),
+            "effective_sample_size": round(ess, 1),
+            "percentiles": {
+                "p05": wq(0.05), "p25": wq(0.25), "p50": wq(0.50),
+                "p75": wq(0.75), "p95": wq(0.95),
+            },
+            "histogram": {
+                "bin_edges_mj": [round(float(e), 3) for e in edges],
+                "weights": [round(float(c), 5) for c in counts],
+            },
+        }

@@ -101,10 +101,26 @@ response carries `Deprecation: true`. The frontend must not read decisions from 
 
 Swagger UI at `http://localhost:8000/docs`.
 
+## Interactive demo
+
+`/api/v1/demo/*` — change race inputs (our SoC, hidden rival SoC, gap, noise) and
+watch the engine respond; score the Rival Energy Estimator against a hidden ground
+truth it never receives; replay the estimator lap-by-lap. Ground truth is never in
+`POST /api/v1/decision`. See **[docs/demo.md](docs/demo.md)**.
+
+```bash
+curl -s localhost:8000/api/v1/demo/presets | jq
+curl -s -X POST localhost:8000/api/v1/demo/preset/RIVAL_ENERGY_HIGH | jq .rival_validation
+curl -s -X POST localhost:8000/api/v1/demo/rival-trace \
+  -d '{"scenario":"B","seed":42,"up_to_lap":20,"overrides":{"rival_initial_soc_mj":7.5}}' \
+  -H 'content-type: application/json' | jq '.steps[-1]'
+```
+
 ## Docs
 
 - [docs/architecture.md](docs/architecture.md) — the pipeline and the LLM boundary
 - [docs/api-contract.md](docs/api-contract.md) — every endpoint and the snapshot shape
+- [docs/demo.md](docs/demo.md) — the interactive demo + how to demonstrate the rival estimator
 - [docs/methodology.md](docs/methodology.md) — the algorithms
 - [docs/regulation.md](docs/regulation.md) — every regulatory constant + provenance
 

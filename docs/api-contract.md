@@ -14,6 +14,17 @@ Body (all optional):
   "total_laps": 50,
   "lap": 30,                       // default: last lap
   "with_narrative": false,         // also fill `narrative` via LLM/fallback
+  "overrides": {                   // manual race-input control (synthetic only)
+    "initial_soc_mj": 7.2,         //   our SoC
+    "rival_initial_soc_mj": 6.8,   //   HIDDEN rival SoC — sets the sim's ground truth;
+                                    //   the estimator still infers it. Never echoed back here.
+    "gap_to_car_ahead_s": 0.58,
+    "gap_to_car_behind_s": 2.4,
+    "rival_terminal_speed_kmh": 312.0,
+    "lap_energy_deployed_mj": 1.2,
+    "noise_scale": 1.0,            //   >1 = noisier rival telemetry
+    "rival_obs_dropout": 0.0       //   fraction of laps with no rival observation
+  },
   "fastf1": {                      // required only when source == "fastf1"
     "year": 2024, "event": "Monza", "session": "R",
     "our_driver": "VER", "rival_driver": "LEC", "laps": [30,31,32]
@@ -85,6 +96,64 @@ Determinism: identical body ⇒ identical response except `meta.generated_at`. T
 when the same ML model artifact is present (it feeds `opportunity.current_window_overtake_prob`
 and `meta.config_fingerprint`). Train it with `python scripts/train_models.py`
 (seeded — everyone gets the same model).
+
+## Interactive demo + Rival Estimator validation — `/api/v1/demo/*`
+
+Same deterministic pipeline. These endpoints add **manual input control**, a
+**`rival_validation`** block (estimator vs. the simulator's hidden ground truth —
+DEMO ONLY), and a **sequential estimator replay** for animation. Ground truth is
+**never** in `POST /api/v1/decision`.
+
+```
+GET  /api/v1/demo/presets
+  -> { "presets": [ { key, label, description, scenario, lap, overrides, expectation, pair_group } ] }
+
+POST /api/v1/demo/preset/{key}?seed=42        // run a named preset
+POST /api/v1/demo/decision                    // free-form; body = DecisionRequest + { telemetry_glitch }
+  -> {
+       "snapshot": DecisionSnapshot,           // identical shape to POST /api/v1/decision
+       "rival_validation": {
+         "enabled": true,
+         "label": "ESTIMATED RIVAL ENERGY vs GROUND TRUTH — DEMO ONLY",
+         "estimated_reserve_mj": 6.49, "estimated_std_mj": 0.90,
+         "bucket": "HIGH", "distribution": { "low", "medium", "high" },
+         "confidence": 0.72, "n_observations": 28, "estimate_uncertain": false,
+         "latest_observation": { terminal_speed_kmh, clipping_point_fraction,
+                                 corner_exit_accel_g, sector_delta_s },
+         "particle_summary": { n_particles, effective_sample_size,
+                               percentiles: {p05,p25,p50,p75,p95},
+                               histogram: { bin_edges_mj:[13], weights:[12] } },
+         "ground_truth_reserve_mj": 7.77,       // <- HIDDEN. simulator only. not telemetry.
+         "error_mj": -1.28, "abs_error_mj": 1.28, "within_1_sigma": false,
+         "ground_truth_note": "..."
+       },
+       "inputs_resolved": { ...effective sim preset..., "_preset": "...", "_expectation": "..." }
+     }
+
+POST /api/v1/demo/rival-trace                 // body { source, scenario, seed, up_to_lap, overrides, fastf1 }
+  -> {
+       "source": "synthetic",
+       "ground_truth_available": true,          // false for fastf1 (F1 publishes no rival SoC)
+       "note": "GROUND TRUTH — DEMO ONLY. ...",
+       "steps": [ { lap, had_observation, observation, estimated_reserve_mj, estimated_std_mj,
+                    n_observations, bucket, distribution, effective_sample_size,
+                    uncertainty_trend: "more_certain|less_certain|flat",
+                    ground_truth_reserve_mj, error_mj } ],   // one step per lap — the real filter state
+       "final_particle_summary": { ...same as particle_summary above... }
+     }
+```
+
+`source: "fastf1"` works on every demo endpoint too — it routes through the same
+`load_replay()` -> `ReplayProvider` -> pipeline. `rival_validation.enabled` stays
+`true` but `ground_truth_reserve_mj` is `null`.
+
+## Determinism
+
+Identical body ⇒ identical response except `meta.generated_at` (for both the
+production and demo endpoints). The *decision* is reproducible on any machine; the
+full JSON is byte-identical only when the same ML model artifact is present (it
+feeds `opportunity.current_window_overtake_prob` and `meta.config_fingerprint`).
+Train it with `python scripts/train_models.py` (seeded — everyone gets the same model).
 
 `POST /api/v1/decision` is the **single authoritative ChronoPace decision source.**
 The frontend consumes this endpoint (or the WebSocket `decision_snapshot`, which

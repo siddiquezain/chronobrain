@@ -101,6 +101,25 @@ def run_decision(
     fills `snapshot.narrative` via app.narrative (never changes any other field).
     """
     cfg = config or DecisionConfig()
+    ctx = run_pipeline(provider, lap=lap, config=cfg)
+    snapshot = _assemble(ctx, provider.describe())
+    if with_narrative:
+        snapshot.narrative = _narrate(snapshot)
+    return snapshot
+
+
+def run_pipeline(
+    provider: TelemetryProvider,
+    *,
+    lap: Optional[int] = None,
+    config: Optional[DecisionConfig] = None,
+) -> DecisionContext:
+    """
+    Run every stage and return the populated `DecisionContext` WITHOUT assembling
+    the snapshot. `run_decision()` wraps this; the demo/validation layer uses it to
+    also read `ctx._estimator` / `ctx.rival`. Same determinism guarantees.
+    """
+    cfg = config or DecisionConfig()
     all_laps = provider.laps()
     if not all_laps:
         raise ValueError("provider yielded no laps")
@@ -122,11 +141,13 @@ def run_decision(
     _run_horizon(ctx)           # opportunity horizon + Future Energy Value
     _run_confidence(ctx)        # Stage 3 — significance + DCLI + rival + data quality
     _fuse(ctx)                  # decision engine — pick from the feasible set
+    return ctx
 
-    snapshot = _assemble(ctx, provider.describe())
-    if with_narrative:
-        snapshot.narrative = _narrate(snapshot)
-    return snapshot
+
+def assemble_snapshot(ctx: DecisionContext, source_detail: str = "") -> DecisionSnapshot:
+    """Public wrapper around the snapshot assembler — used by the demo layer,
+    which also needs the raw `ctx`."""
+    return _assemble(ctx, source_detail)
 
 
 def run_scenario(
@@ -184,6 +205,7 @@ def _thread_state(ctx: DecisionContext) -> None:
             ctx.gate_result = gr  # provisional; re-evaluated in _run_gate for clarity
         banked = gr.qualifies_for_overtake_bonus_next_lap
 
+    ctx._estimator = estimator
     ctx.rival = _rival_features(ctx, estimator)
 
 
@@ -194,13 +216,8 @@ def _rival_features(ctx: DecisionContext, estimator: RivalStateEstimator) -> Opt
     cfg = ctx.config
 
     lo, hi = cfg.rival_low_soc_mj, cfg.rival_high_soc_mj
-    std = max(est.std_soc_mj, 1e-6)
-    p_low = _norm_cdf((lo - est.mean_soc_mj) / std)
-    p_high = 1.0 - _norm_cdf((hi - est.mean_soc_mj) / std)
-    p_med = max(0.0, 1.0 - p_low - p_high)
-    total = p_low + p_med + p_high
-    dist = {"low": p_low / total, "medium": p_med / total, "high": p_high / total}
-    bucket = max(dist, key=dist.get).upper()
+    dist = est.bucket_distribution(lo, hi)
+    bucket = est.bucket(lo, hi)
 
     threshold = cfg.confidence_config().rival_confidence_threshold_mj
     uncertain = est.std_soc_mj > threshold

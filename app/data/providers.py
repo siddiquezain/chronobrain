@@ -14,7 +14,9 @@ so callers can fail with a clear message instead of an ImportError deep in a sta
 from __future__ import annotations
 
 import abc
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+import numpy as np
 
 from app.data.samples import NormalizedLap
 from telemetry_simulator import SCENARIO_PRESETS, TelemetrySimulator
@@ -45,11 +47,28 @@ class SyntheticProvider(TelemetryProvider):
     """
     Wraps the deterministic root `TelemetrySimulator`. The simulator's SoC is the
     ground truth of its synthetic world, so `energy_is_modeled=False` here.
+
+    `preset_overrides` lets the interactive demo change race inputs (our SoC, the
+    HIDDEN rival SoC, gap, rival terminal speed, deployment, telemetry noise). The
+    rival SoC override sets only the simulator's hidden state — the estimator still
+    has to infer it from the generated telemetry.
+
+    `rival_obs_dropout` drops the rival observation on a deterministic fraction of
+    laps (freshness / data-quality demo). `ground_truth_rival_soc_by_lap` is
+    populated by `laps()` and is DEMO-ONLY — the decision engine never sees it.
     """
 
     data_mode = "SYNTHETIC"
 
-    def __init__(self, scenario: str = "B", seed: int = 42, total_laps: int = 50):
+    def __init__(
+        self,
+        scenario: str = "B",
+        seed: int = 42,
+        total_laps: int = 50,
+        preset_overrides: Optional[dict] = None,
+        rival_obs_dropout: float = 0.0,
+        telemetry_glitch: bool = False,
+    ):
         if scenario not in SCENARIO_PRESETS:
             raise ValueError(
                 f"Unknown scenario {scenario!r}; choose from {sorted(SCENARIO_PRESETS)}"
@@ -57,19 +76,40 @@ class SyntheticProvider(TelemetryProvider):
         self.scenario = scenario
         self.seed = seed
         self.total_laps = total_laps
+        self.preset_overrides = dict(preset_overrides or {})
+        self.rival_obs_dropout = max(0.0, min(1.0, float(rival_obs_dropout)))
+        # Deterministically corrupt the feed (missing laps + an out-of-range value)
+        # so the Data Quality Gate degrades and the Confidence Gate abstains.
+        self.telemetry_glitch = bool(telemetry_glitch)
+        self.ground_truth_rival_soc_by_lap: Dict[int, float] = {}
 
     def laps(self) -> List[NormalizedLap]:
         sim = TelemetrySimulator(
-            scenario=self.scenario, seed=self.seed, total_laps=self.total_laps
+            scenario=self.scenario, seed=self.seed, total_laps=self.total_laps,
+            preset_overrides=self.preset_overrides,
         )
+        seq = sim.generate_sequence(self.total_laps)
+        self.ground_truth_rival_soc_by_lap = {
+            i + 1: gt for i, gt in enumerate(sim.rival_soc_ground_truth)
+        }
+        drop_rng = np.random.default_rng(self.seed + 777)
+        # telemetry_glitch: a fixed, deterministic corruption pattern — skip some
+        # interior laps (missing lap numbers) and push several speeds out of range.
+        # Laps {12, 18, 24, 30} are corrupted so a demo can target one of them.
+        glitch_missing = {7, 11, 16, 21} if self.telemetry_glitch else set()
+        glitch_bad_speed = {12, 18, 24, 30} if self.telemetry_glitch else set()
         out: List[NormalizedLap] = []
-        for tel, obs in sim.generate_sequence(self.total_laps):
+        for tel, obs in seq:
+            if tel.lap_number in glitch_missing:
+                continue
+            drop = self.rival_obs_dropout > 0.0 and float(drop_rng.random()) < self.rival_obs_dropout
+            speed = 940.0 if tel.lap_number in glitch_bad_speed else tel.speed_kmh
             out.append(
                 NormalizedLap(
                     lap=tel.lap_number,
                     total_laps=tel.total_laps,
                     data_mode="SYNTHETIC",
-                    our_speed_kmh=tel.speed_kmh,
+                    our_speed_kmh=speed,
                     our_soc_mj=tel.current_soc_mj,
                     our_lap_start_soc_mj=tel.lap_start_soc_mj,
                     our_lap_energy_deployed_mj=tel.lap_energy_deployed_mj,
@@ -81,19 +121,22 @@ class SyntheticProvider(TelemetryProvider):
                         tel.gap_to_car_ahead_s is not None
                         and tel.gap_to_car_ahead_s < 1.0
                     ),
-                    rival_terminal_speed_kmh=obs.terminal_speed_kmh,
-                    rival_clipping_point_fraction=obs.clipping_point_fraction,
-                    rival_corner_exit_accel_g=obs.corner_exit_accel_g,
-                    rival_sector_delta_s=obs.sector_delta_s,
+                    rival_terminal_speed_kmh=None if drop else obs.terminal_speed_kmh,
+                    rival_clipping_point_fraction=None if drop else obs.clipping_point_fraction,
+                    rival_corner_exit_accel_g=None if drop else obs.corner_exit_accel_g,
+                    rival_sector_delta_s=None if drop else obs.sector_delta_s,
                     energy_is_modeled=False,
                     raw_sample_count=0,
-                    source_detail=f"synthetic scenario {self.scenario}, seed {self.seed}",
+                    source_detail=self.describe(),
                 )
             )
         return out
 
     def describe(self) -> str:
-        return f"synthetic scenario {self.scenario}, seed {self.seed}, {self.total_laps} laps"
+        extra = ""
+        if self.preset_overrides:
+            extra = " + overrides(" + ",".join(sorted(self.preset_overrides)) + ")"
+        return f"synthetic scenario {self.scenario}, seed {self.seed}, {self.total_laps} laps{extra}"
 
 
 class ReplayProvider(TelemetryProvider):
@@ -124,16 +167,23 @@ def build_provider(
     scenario: str = "B",
     seed: int = 42,
     total_laps: int = 50,
+    preset_overrides: Optional[dict] = None,
+    rival_obs_dropout: float = 0.0,
+    telemetry_glitch: bool = False,
     fastf1_kwargs: Optional[dict] = None,
 ) -> TelemetryProvider:
     """
-    source='synthetic' -> SyntheticProvider
+    source='synthetic' -> SyntheticProvider (with optional preset_overrides)
     source='fastf1'    -> ReplayProvider over fastf1_service.load_replay(**fastf1_kwargs)
 
     The same downstream engine consumes whichever comes back.
     """
     if source == "synthetic":
-        return SyntheticProvider(scenario=scenario, seed=seed, total_laps=total_laps)
+        return SyntheticProvider(
+            scenario=scenario, seed=seed, total_laps=total_laps,
+            preset_overrides=preset_overrides, rival_obs_dropout=rival_obs_dropout,
+            telemetry_glitch=telemetry_glitch,
+        )
 
     if source == "fastf1":
         if not FASTF1_AVAILABLE:
