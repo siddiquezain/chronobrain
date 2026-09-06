@@ -23,8 +23,10 @@ from planner import PlannerResult
 from rival_estimator import RivalSocEstimate
 from rule_gate import GateResult
 
+from app.data.quality import DataQuality
 from app.data.samples import NormalizedLap
 from app.decision.config import DecisionConfig
+from app.decision.window import WindowFeatures
 
 
 @dataclass
@@ -48,6 +50,8 @@ class RivalFeatures:
     distribution: dict              # low/medium/high probabilities
     confidence: float
     uncertain: bool
+    freshness_laps: int = 0         # laps since the last usable rival observation
+    p_defend: float = 0.0           # deterministic scalar: P(rival actively defends)
 
 
 @dataclass
@@ -61,12 +65,20 @@ class DecisionContext:
     overtake_bonus_banked: bool = False
 
     # stage outputs (filled in order)
+    data_quality: Optional[DataQuality] = None
+    window: Optional[WindowFeatures] = None
     energy: Optional[EnergyFeatures] = None
     ml_overtake_prob: Optional[float] = None
     rival: Optional[RivalFeatures] = None
     gate_result: Optional[GateResult] = None
+    candidate_actions: List[str] = field(default_factory=list)
+    feasible_actions: List[str] = field(default_factory=list)
+    rejected_alternatives: List[dict] = field(default_factory=list)  # [{action, reason}]
     planner_result: Optional[PlannerResult] = None
     horizon_result: Optional[HorizonResult] = None
+    opportunity_uncertain: bool = False
+    prefers_wait: bool = False
+    wait_n: int = 0
     confidence_result: Optional[ConfidenceGateResult] = None
 
     # planner instance retained so the confidence gate can pull raw MC samples

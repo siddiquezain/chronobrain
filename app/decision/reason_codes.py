@@ -37,11 +37,15 @@ VOCAB: dict[str, str] = {
     "STATISTICAL_EVIDENCE_WEAK": "Statistical evidence for the top mode is below threshold.",
     "PRACTICAL_DIFFERENCE_SMALL": "The gap between the top two modes is not practically meaningful.",
     "DRIVER_LOAD_HIGH": "Driver cognitive load is high — deferring the mode change.",
+    "DATA_QUALITY_LOW": "Telemetry quality is degraded — holding a safe policy.",
+    "OPPORTUNITY_AMBIGUOUS": "The horizon cannot separate the strategies — not committing energy.",
     # defence
     "DEFENDING_POSITION": "Defending track position against a closing car behind.",
     # ML input
     "ML_OVERTAKE_PROB_HIGH": "The overtake-success model rates completion likely.",
     "ML_OVERTAKE_PROB_LOW": "The overtake-success model rates completion unlikely.",
+    # rival behaviour
+    "RIVAL_LIKELY_TO_DEFEND": "The rival is likely to defend the position.",
 }
 
 
@@ -60,6 +64,7 @@ class ReasonInputs:
     override_reason: str
     rival_bucket: Optional[str]           # "LOW" | "MEDIUM" | "HIGH" | None
     rival_estimate_uncertain: bool
+    rival_p_defend: float
     horizon_strategy: str                 # "ATTACK_NOW" | "WAIT_2" | ... | "HOLD"
     horizon_prefers_wait: bool
     energy_reserve_low: bool
@@ -67,6 +72,8 @@ class ReasonInputs:
     ml_overtake_prob: Optional[float]
     ml_prob_high: float
     ml_prob_low: float
+    data_quality_status: str = "GOOD"     # GOOD | DEGRADED | INVALID
+    opportunity_ambiguous: bool = False
 
 
 def select(inp: ReasonInputs) -> List[str]:
@@ -102,6 +109,11 @@ def select(inp: ReasonInputs) -> List[str]:
             codes.append("DRIVER_LOAD_HIGH")
         if "RIVAL_CONFIDENCE" in inp.override_reason:
             codes.append("RIVAL_ESTIMATE_UNCERTAIN")
+        if "DATA_QUALITY" in inp.override_reason:
+            codes.append("OPPORTUNITY_AMBIGUOUS" if inp.opportunity_ambiguous else "DATA_QUALITY_LOW")
+
+    if inp.data_quality_status == "INVALID" and "DATA_QUALITY_LOW" not in codes:
+        codes.append("DATA_QUALITY_LOW")
 
     # --- rival state ---
     if inp.rival_estimate_uncertain and "RIVAL_ESTIMATE_UNCERTAIN" not in codes:
@@ -138,6 +150,10 @@ def select(inp: ReasonInputs) -> List[str]:
             codes.append("ML_OVERTAKE_PROB_HIGH")
         elif inp.ml_overtake_prob <= inp.ml_prob_low:
             codes.append("ML_OVERTAKE_PROB_LOW")
+
+    # --- rival behaviour ---
+    if inp.rival_p_defend >= 0.6 and (aggressive or inp.horizon_prefers_wait):
+        codes.append("RIVAL_LIKELY_TO_DEFEND")
 
     # dedupe, preserve order
     seen = set()

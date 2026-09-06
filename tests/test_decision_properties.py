@@ -26,8 +26,9 @@ def test_high_energy_attacks_low_energy_holds():
     attack = run_scenario("B", seed=42, total_laps=50, lap=20)   # high SoC
     hold = run_scenario("C", seed=42, total_laps=50, lap=20)     # low SoC, same small gap
     assert attack.decision.action == "ATTACK_NOW"
+    # low energy: never attack now — either hold, or defer to a window we can afford
     assert hold.decision.mode in ("CONSERVE_MODE", "BALANCED_MODE")
-    assert hold.decision.action in ("HOLD", "CONSERVE")
+    assert hold.decision.action in ("HOLD", "CONSERVE") or hold.decision.action.startswith("WAIT_")
 
 
 def test_energy_reserve_low_blocks_aggression_even_when_planner_wants_it():

@@ -38,10 +38,18 @@ curl -s -X POST localhost:8000/api/v1/decision \
   -d '{"scenario":"B","seed":42,"lap":30,"with_narrative":true}' | jq
 ```
 
-Returns one `DecisionSnapshot`: `decision`, `energy`, `rival`, `opportunity`,
-`monte_carlo`, `compliance`, `confidence`, `reason_codes`, `trace`, and an optional
-`narrative`. Identical request ⇒ identical response (bar the timestamp). Full shape
-in [docs/api-contract.md](docs/api-contract.md).
+Returns one `DecisionSnapshot`: `decision`, `data_quality`, `window`, `energy`,
+`rival`, `opportunity` (with Future Energy Value), `monte_carlo`, `compliance`,
+`confidence`, `constraints`, `candidate_actions` / `feasible_actions` /
+`rejected_alternatives`, `reason_codes`, `trace`, and an optional `narrative`.
+Identical request ⇒ identical response (bar the timestamp). Full shape in
+[docs/api-contract.md](docs/api-contract.md).
+
+The pipeline: **Data Quality Gate → event-time window → energy + rival estimate
+(+ P_defend) → regulatory gate → candidate → feasible set → Monte Carlo →
+Opportunity Horizon with Future Energy Value → 5-gate Confidence Gate → decision
+engine → verified snapshot → optional narrator.** Python computes and verifies
+every number; the LLM only phrases the finished result.
 
 ## Telemetry sources
 

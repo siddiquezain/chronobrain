@@ -26,6 +26,28 @@ def build_trace(ctx: DecisionContext) -> List[TraceStep]:
         detail=f"Lap {t.lap}/{t.total_laps} | gap ahead {gap} | SoC {soc}{modeled} | source: {t.data_mode}",
     ))
 
+    if ctx.data_quality is not None:
+        dq = ctx.data_quality
+        steps.append(TraceStep(
+            stage="Data quality",
+            detail=(
+                f"{dq.status} (score {dq.quality_score:.2f}) | "
+                f"dropped {dq.dropped_samples} | rival stale {dq.freshness_laps} lap(s) | "
+                + ("; ".join(dq.checks[:2]))
+            ),
+        ))
+
+    if ctx.window is not None:
+        w = ctx.window
+        gap_tr = "n/a" if w.gap_ahead_trend_s_per_lap is None else f"{w.gap_ahead_trend_s_per_lap:+.3f}s/lap"
+        steps.append(TraceStep(
+            stage="Event-time window",
+            detail=(
+                f"{w.n_laps} laps | opportunity {w.opportunity_trend} | "
+                f"gap trend {gap_tr} | {'closing' if w.closing else 'not closing'}"
+            ),
+        ))
+
     if ctx.rival is not None:
         d = ctx.rival.distribution
         steps.append(TraceStep(
@@ -34,21 +56,8 @@ def build_trace(ctx: DecisionContext) -> List[TraceStep]:
                 f"{ctx.rival.bucket} "
                 f"(LOW {d['low']*100:.0f}% / MED {d['medium']*100:.0f}% / HIGH {d['high']*100:.0f}%) | "
                 f"mean {ctx.rival.estimate.mean_soc_mj:.2f} +/- {ctx.rival.estimate.std_soc_mj:.2f} MJ | "
-                f"{ctx.rival.estimate.n_observations} obs | "
+                f"{ctx.rival.estimate.n_observations} obs | P(defend) {ctx.rival.p_defend:.2f} | "
                 f"{'UNCERTAIN' if ctx.rival.uncertain else 'usable'}"
-            ),
-        ))
-
-    if ctx.horizon_result is not None:
-        h = ctx.horizon_result
-        cur = next((s for s in h.ranked_strategies if s.strategy_name == "ATTACK_NOW"), None)
-        steps.append(TraceStep(
-            stage="Opportunity horizon",
-            detail=(
-                f"best = {h.recommended_strategy} | "
-                f"ATTACK_NOW horizon d {cur.mean_horizon_delta_s:+.3f}s | "
-                f"foregone {h.foregone_strategy} by {h.foregone_value_gap_s:.3f}s"
-                if cur else f"best = {h.recommended_strategy}"
             ),
         ))
 
@@ -58,10 +67,37 @@ def build_trace(ctx: DecisionContext) -> List[TraceStep]:
         steps.append(TraceStep(
             stage="Regulatory gate",
             detail=(
-                f"legal candidates: {len(g.legal_modes)}/5"
+                f"legal modes: {len(g.legal_modes)}/5"
                 + (f" | rejected {', '.join(rejected)}" if rejected else "")
             ),
         ))
+
+    if ctx.candidate_actions:
+        rej = "; ".join(f"{r['action']} ({r['reason']})" for r in ctx.rejected_alternatives) or "none"
+        steps.append(TraceStep(
+            stage="Feasible set",
+            detail=f"feasible: {', '.join(ctx.feasible_actions)} | rejected: {rej}",
+        ))
+
+    if ctx.horizon_result is not None:
+        h = ctx.horizon_result
+        cur = next((s for s in h.ranked_strategies if s.strategy_name == "ATTACK_NOW"), None)
+        if h.future_energy_value_active and cur is not None:
+            best = h.ranked_strategies[0]
+            detail = (
+                f"best = {h.recommended_strategy} (strategic value {best.strategic_value:+.3f}) | "
+                f"ATTACK_NOW value {cur.strategic_value:+.3f} "
+                f"(opp {cur.current_opportunity_value:+.2f}, e-cost {cur.energy_opportunity_cost:.2f}) | "
+                f"end SoC {best.end_soc_mj:.1f} MJ"
+            )
+        elif cur is not None:
+            detail = (
+                f"best = {h.recommended_strategy} | ATTACK_NOW horizon d {cur.mean_horizon_delta_s:+.3f}s | "
+                f"foregone {h.foregone_strategy} by {h.foregone_value_gap_s:.3f}s"
+            )
+        else:
+            detail = f"best = {h.recommended_strategy}"
+        steps.append(TraceStep(stage="Opportunity horizon (future energy value)", detail=detail))
 
     if ctx.planner_result is not None:
         p = ctx.planner_result
@@ -80,7 +116,8 @@ def build_trace(ctx: DecisionContext) -> List[TraceStep]:
         gates = (
             f"stat {_pf(c.statistical_reliability_passed)} / "
             f"prac {_pf(c.practical_significance_passed)} / "
-            f"DCLI {_pf(c.dcli_passed)} / rival {_pf(c.rival_confidence_passed)}"
+            f"DCLI {_pf(c.dcli_passed)} / rival {_pf(c.rival_confidence_passed)} / "
+            f"data {_pf(getattr(c, 'data_quality_passed', True))}"
         )
         steps.append(TraceStep(
             stage="Confidence gate",

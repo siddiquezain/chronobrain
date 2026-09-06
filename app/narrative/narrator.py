@@ -65,10 +65,15 @@ def _payload(snapshot: "DecisionSnapshot") -> dict:
     return {
         "decision": snapshot.decision.model_dump(),
         "confidence": snapshot.confidence.model_dump(),
+        "data_quality": {
+            "status": snapshot.data_quality.status,
+            "quality_score": snapshot.data_quality.quality_score,
+        },
         "rival": snapshot.rival.model_dump(),
         "opportunity": {
             "recommended_strategy": snapshot.opportunity.recommended_strategy,
             "prefers_wait": snapshot.opportunity.prefers_wait,
+            "opportunity_trend": snapshot.opportunity.opportunity_trend,
             "foregone_strategy": snapshot.opportunity.foregone_strategy,
             "foregone_value_gap_s": snapshot.opportunity.foregone_value_gap_s,
         },
@@ -76,6 +81,8 @@ def _payload(snapshot: "DecisionSnapshot") -> dict:
             "legal": snapshot.compliance.legal,
             "legal_modes": snapshot.compliance.legal_modes,
         },
+        "feasible_actions": snapshot.feasible_actions,
+        "rejected_alternatives": [r.model_dump() for r in snapshot.rejected_alternatives],
         "reason_codes": snapshot.reason_codes,
         "reasons": snapshot.reasons,
     }

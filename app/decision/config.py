@@ -37,8 +37,19 @@ class DecisionConfig:
 
     # --- energy policy (MODEL_ASSUMPTION) ---
     low_reserve_mj: float = 2.0          # below this, prefer CONSERVE over BALANCED when holding
+    reserve_floor_mj: float = 1.0        # a strategy may not deploy below this in the horizon
     rival_low_soc_mj: float = 3.0        # bucket edges for rival LOW / MEDIUM / HIGH
     rival_high_soc_mj: float = 6.0
+
+    # --- event-time window / trends ---
+    window_laps: int = 5
+
+    # --- future energy value (opportunity horizon) ---
+    overtake_reward_s: float = 0.3       # laptime-equivalent value of taking a window
+    future_window_bias_s: float = 0.12   # bonus for waiting when the window is IMPROVING
+
+    # --- data quality -> confidence ---
+    data_quality_floor: float = 0.6      # below this the confidence gate abstains
 
     # --- ML overtake-probability salience thresholds (MODEL_ASSUMPTION) ---
     ml_prob_high: float = 0.60
@@ -54,7 +65,7 @@ class DecisionConfig:
         return RivalEstimatorConfig(default_seed=self.seed)
 
     def confidence_config(self) -> ConfidenceGateConfig:
-        return ConfidenceGateConfig()
+        return ConfidenceGateConfig(data_quality_pass_threshold=self.data_quality_floor)
 
     def horizon_config(self) -> HorizonConfig:
         return HorizonConfig(

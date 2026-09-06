@@ -121,6 +121,10 @@ class PlanningContext:
 
     gap_to_car_ahead_s: Optional[float] = None
     rival_soc_estimate: Optional[RivalSocEstimate] = None
+    # Optional scalar probability the rival will actively defend (0..1), estimated
+    # deterministically upstream from observable behaviour. None -> not modelled,
+    # behaviour byte-identical to before this field existed.
+    p_defend: Optional[float] = None
 
 
 class ModeProjection(BaseModel):
@@ -280,6 +284,9 @@ class MonteCarloPlanner:
             rival_soc = np.clip(rival_soc, 0.0, _DEFAULT_GATE_CONFIG.max_deployment_per_lap_mj)
             defense_factor = rival_soc / _DEFAULT_GATE_CONFIG.max_deployment_per_lap_mj
             eff_prob = base_prob - cfg.defense_penalty_weight * defense_factor
+            if ctx.p_defend is not None:
+                # explicit behavioural signal, on top of the SoC-derived defense factor
+                eff_prob = eff_prob - cfg.defense_penalty_weight * float(ctx.p_defend)
             return np.clip(eff_prob, 0.0, 1.0)
 
         return np.full(n, base_prob)

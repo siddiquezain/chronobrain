@@ -42,16 +42,19 @@ FastF1 historical replay      Synthetic simulator
         ┌──────────────────────────────────────────┐
         │  DECISION PIPELINE  (app/decision/engine) │
         │                                          │
+        │  Data Quality Gate   (app/data/quality)   │  GOOD/DEGRADED/INVALID -> Stage 3
+        │  event-time window   (app/decision/window)│  short-horizon trends
         │  feature extraction (energy, ML P(o/t))   │
-        │  rival particle filter  (rival_estimator) │
+        │  rival particle filter  (rival_estimator) │  + P_defend scalar
         │  Stage 1  RegulatoryGate  (rule_gate)     │  legality only
+        │  candidate actions -> feasible set        │  before the planner runs
         │  Stage 2  MonteCarloPlanner (planner)     │  ranks legal modes
-        │           OpportunityEngine               │  ATTACK_NOW / WAIT_N / HOLD
-        │  Stage 3  ConfidenceGate                  │  may override → BALANCED
-        │  DECISION ENGINE (fusion)                 │  final mode + action + codes
+        │           OpportunityEngine + FEV         │  ATTACK_NOW/WAIT_N/HOLD, energy carried fwd
+        │  Stage 3  ConfidenceGate (5 gates)        │  may override → BALANCED
+        │  DECISION ENGINE (fusion)                 │  pick from the feasible set
         └──────────────────────┬───────────────────┘
                    ▼
-        DecisionSnapshot  (verified JSON)  ── + DecisionTrace
+        DecisionSnapshot  (verified JSON)  ── + DecisionTrace + rejected alternatives
                    ▼
         Stage 4  LLM Narrator   app/narrative/narrator.py   (optional, additive)
                    ▼
@@ -76,8 +79,8 @@ New in `app/`:
 
 | Path | Role |
 |---|---|
-| `app/data/` | Telemetry provider abstraction: `TelemetrySample`, `NormalizedLap`, `SyntheticProvider`, `ReplayProvider`, `fastf1_service` (the only module that imports `fastf1`). |
-| `app/decision/` | `run_decision()` orchestrator, `DecisionConfig`, `DecisionContext`, unified `reason_codes`, `DecisionSnapshot`, `DecisionTrace`, the fusion step. |
+| `app/data/` | Telemetry provider abstraction: `TelemetrySample`, `NormalizedLap`, `SyntheticProvider`, `ReplayProvider`, `fastf1_service` (the only module that imports `fastf1`), **`quality.py`** (Data Quality Gate). |
+| `app/decision/` | `run_decision()` orchestrator, `DecisionConfig`, `DecisionContext`, **`window.py`** (event-time trends), **`actions.py`** (candidate/feasible set), unified `reason_codes`, `DecisionSnapshot`, `DecisionTrace`, the fusion step, **`outcome_log.py`** (opt-in prediction→outcome log). |
 | `app/narrative/` | Stage 4 — `narrate(snapshot)`; the only place a language model runs. |
 | `app/regulation/` | Provenance catalogue for every `GateConfig` constant (see `docs/regulation.md`). |
 | `app/engines/` | Legacy Stack B engines (energy/overtake/ML feature extractors + legacy `StrategyEngine`). `EnergyEngine`/`OvertakeEngine`/ML feed the new pipeline; `StrategyEngine`/`RiskEngine`/`AppRegulatoryGate` remain only behind the pre-existing GET endpoints. |

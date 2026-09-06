@@ -32,16 +32,63 @@ Simulates 10,000 race trajectories per legal mode using NumPy's seeded RNG.
 
 ## Stage 3 — Confidence Gate
 
-Four sequential gates, all must pass for the planner's recommendation to stand:
+Five sequential gates, all must pass for the planner's recommendation to stand:
 
 1. **Statistical reliability** — Welch t-test between top and runner-up mode samples (p < 0.05)
 2. **Practical significance** — |Δlaptime| > 0.05 s and |ΔP(overtake)| > 3 percentage points
 3. **DCLI** — Driver Cognitive Load Index ≤ 60.0 (guards against issuing recommendations that would overwhelm the driver during a complex situation)
 4. **Rival confidence** — rival SoC standard deviation ≤ 1.5 MJ (don't commit to an energy strategy when rival state is too uncertain)
+5. **Data quality / opportunity clarity** — the Data Quality Gate's `quality_score` ≥ 0.6 **and** the opportunity horizon can actually separate the strategies. Degraded/stale telemetry or an ambiguous opportunity makes the gate abstain.
 
 Override: if any gate fails, `recommended_mode` → BALANCED_MODE. `override_reason` names **all** failing gates.
 
 **Sign convention**: `diff = mean(runner_up) − mean(top)`. Negative = runner_up has smaller (faster) lap time.
+
+## Data Quality Gate
+
+A pure, deterministic check that runs **before** feature extraction. It does not
+fix or invent telemetry and it does not choose a strategy — it produces a verdict
+(`GOOD | DEGRADED | INVALID`, `quality_score` 0–1, freshness, dropped samples,
+missing fields) that flows into Stage 3. Bad/stale telemetry → lower
+`quality_score` → the confidence gate abstains → BALANCED_MODE.
+
+## Event-Time Window
+
+A short sliding window (default 5 laps) over the normalized lap history. Sorts and
+de-duplicates by lap number (tolerating out-of-order input), then linear-fits each
+channel to produce trends: speed, gap-to-car-ahead (negative = closing), SoC,
+rival terminal speed, rival sector delta. Yields an `opportunity_trend`
+(`IMPROVING | STABLE | DECAYING`) that feeds the opportunity horizon.
+
+## Candidate Actions vs. Feasible Set
+
+Candidate strategic actions (`ATTACK_NOW`, `WAIT_2_LAPS`, `WAIT_5_LAPS`,
+`CONSERVE`, `HOLD`) are planning alternatives, **not** the five deployment modes.
+The regulatory gate plus an energy check reduce them to the *feasible* set before
+the Monte Carlo horizon evaluates anything — the planner never optimises an action
+already known to be illegal or unaffordable. A `WAIT_N` is feasible only if the
+car can harvest enough energy *during* the wait to fund the attack at the window.
+
+## Opportunity Horizon — Future Energy Value
+
+The horizon carries modelled SoC forward lap-by-lap across each candidate
+strategy. A strategy that would starve the reserve before its window cannot
+actually attack (that lap falls back to BALANCED + a missed-attack penalty). Each
+strategy gets a `strategic_value`:
+
+```
+strategic_value = pace  +  current_opportunity_value  +  future_opportunity_value
+                        −  energy_opportunity_cost
+```
+
+`energy_opportunity_cost` rises as the horizon-end reserve nears the floor, so a
+strategy that spends its last megajoule pays for it. Strategies are ranked by
+`strategic_value`. This is how ChronoPace answers *"is spending energy now better
+than preserving it for a better future opportunity?"* — not with a Dynamic
+Programming solver, just a valuation term inside the existing Monte Carlo horizon.
+
+A **prime window** (banked bonus + model-confident + affordable) is only deferred
+for a *substantially* better future window (3× the normal decisive margin).
 
 ## Stage 4 — Narrator
 

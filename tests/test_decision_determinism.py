@@ -18,6 +18,19 @@ def test_same_seed_same_snapshot(scenario):
     a = run_scenario(scenario, seed=42, total_laps=50, lap=25)
     b = run_scenario(scenario, seed=42, total_laps=50, lap=25)
     assert a.deterministic_dict() == b.deterministic_dict()
+    # explicit: same final decision AND same trace
+    assert (a.decision.mode, a.decision.action) == (b.decision.mode, b.decision.action)
+    assert [(s.stage, s.detail) for s in a.trace] == [(s.stage, s.detail) for s in b.trace]
+    assert a.meta.config_fingerprint == b.meta.config_fingerprint
+
+
+def test_config_change_changes_fingerprint():
+    from app.decision import DecisionConfig
+
+    a = run_scenario("B", seed=42, total_laps=50, lap=20)
+    b = run_scenario("B", seed=42, total_laps=50, lap=20,
+                     config=DecisionConfig(seed=42, window_laps=8))
+    assert a.meta.config_fingerprint != b.meta.config_fingerprint
 
 
 @pytest.mark.parametrize("scenario", ["A", "B", "C", "D"])  # E has no legal modes -> no MC samples

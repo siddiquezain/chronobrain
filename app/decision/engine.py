@@ -35,14 +35,24 @@ from rule_gate import DeploymentMode, RegulatoryGate
 
 from app.data.normalizer import to_rival_observation, to_telemetry_input
 from app.data.providers import TelemetryProvider, build_provider
+from app.data.quality import assess_quality
 from app.data.samples import NormalizedLap
+from app.decision.actions import (
+    CANDIDATE_DELAY,
+    CandidateAction,
+    FeasibilityInput,
+    feasible_actions,
+)
 from app.decision.config import DecisionConfig
 from app.decision.context import DecisionContext, EnergyFeatures, RivalFeatures
+from app.decision.window import compute_window
 from app.decision import reason_codes as rc
 from app.decision.snapshot import (
     ComplianceBlock,
     ComplianceCheck,
     ConfidenceBlock,
+    ConstraintsBlock,
+    DataQualityBlock,
     DecisionBlock,
     DecisionSnapshot,
     EnergyBlock,
@@ -50,12 +60,16 @@ from app.decision.snapshot import (
     MonteCarloMode,
     OpportunityBlock,
     OpportunityStrategy,
+    RejectedAlternative,
     RivalBlock,
     SnapshotMeta,
+    WindowBlock,
 )
 from app.decision.trace import build_trace
 from app.regulation.constants import REGULATORY_CONSTANTS
 from app.narrative.narrator import narrate as _narrate
+
+PIPELINE_VERSION = "2.0"  # bumped: data-quality gate, event-time window, FEV, feasible set
 
 _AGGRESSIVE = {
     DeploymentMode.ARM_OVERTAKE_MODE,
@@ -98,13 +112,16 @@ def run_decision(
 
     ctx = DecisionContext(config=cfg, lap_history=history, target_lap=history[-1])
 
+    _run_data_quality(ctx)      # Data Quality Gate (before anything else)
+    _run_window(ctx)            # event-time sliding window -> trends
     _thread_state(ctx)          # bonus qualification + rival particle filter over laps 1..N
     _extract_features(ctx)      # energy + ML P(overtake success)
-    _run_gate(ctx)              # Stage 1
-    _run_planner(ctx)           # Stage 2
-    _run_horizon(ctx)           # opportunity horizon
-    _run_confidence(ctx)        # Stage 3
-    _fuse(ctx)                  # decision engine
+    _run_gate(ctx)              # Stage 1 — legality
+    _run_feasibility(ctx)       # candidate actions -> feasible set
+    _run_planner(ctx)           # Stage 2 — Monte Carlo over legal modes
+    _run_horizon(ctx)           # opportunity horizon + Future Energy Value
+    _run_confidence(ctx)        # Stage 3 — significance + DCLI + rival + data quality
+    _fuse(ctx)                  # decision engine — pick from the feasible set
 
     snapshot = _assemble(ctx, provider.describe())
     if with_narrative:
@@ -132,6 +149,16 @@ def run_scenario(
 # ===========================================================================
 # stages
 # ===========================================================================
+def _run_data_quality(ctx: DecisionContext) -> None:
+    ctx.data_quality = assess_quality(
+        ctx.lap_history, ctx.target_lap, ctx.target_lap.data_mode
+    )
+
+
+def _run_window(ctx: DecisionContext) -> None:
+    ctx.window = compute_window(ctx.lap_history, window=ctx.config.window_laps)
+
+
 def _thread_state(ctx: DecisionContext) -> None:
     """
     Walk laps 1..N. `overtake_bonus_banked` for lap N is set by lap N-1's gate
@@ -179,10 +206,30 @@ def _rival_features(ctx: DecisionContext, estimator: RivalStateEstimator) -> Opt
     uncertain = est.std_soc_mj > threshold
     confidence = float(np.clip(1.0 - est.std_soc_mj / 2.6, 0.0, 1.0))
 
+    freshness = ctx.window.stale_laps if ctx.window is not None else 0
+    p_defend = _p_defend(est.mean_soc_mj, uncertain, ctx.window)
+
     return RivalFeatures(
         estimate=est, bucket=bucket, distribution=dist,
         confidence=round(confidence, 4), uncertain=uncertain,
+        freshness_laps=freshness, p_defend=p_defend,
     )
+
+
+def _p_defend(rival_mean_soc_mj: float, uncertain: bool, window) -> float:
+    """
+    Deterministic scalar P(rival actively defends). A rival with more energy can
+    defend harder; a rival being caught is more likely to; an uncertain estimate
+    is pulled toward a neutral 0.4. Small statistical input to the planner — NOT a
+    behavioural model and NOT a replacement for the rival-energy estimator.
+    """
+    soc_frac = float(np.clip(rival_mean_soc_mj / _SOC_CEIL_MJ, 0.0, 1.0))
+    base = 0.20 + 0.45 * soc_frac
+    if window is not None and getattr(window, "closing", False):
+        base += 0.15
+    if uncertain:
+        base = 0.5 * base + 0.5 * 0.4
+    return round(float(np.clip(base, 0.0, 0.9)), 4)
 
 
 def _extract_features(ctx: DecisionContext) -> None:
@@ -218,12 +265,30 @@ def _run_gate(ctx: DecisionContext) -> None:
     ctx.gate_result = RegulatoryGate(config=ctx.config.gate_config()).evaluate(ti)
 
 
+def _run_feasibility(ctx: DecisionContext) -> None:
+    """Candidate strategic actions -> feasible set (legality + energy), before the planner."""
+    e = ctx.energy
+    fin = FeasibilityInput(
+        gate_result=ctx.gate_result,
+        soc_mj=e.soc_mj if e else 0.0,
+        projected_reserve_mj=e.projected_reserve_mj if e else 0.0,
+        can_afford_aggressive=e.can_afford_aggressive if e else False,
+        reserve_floor_mj=ctx.config.reserve_floor_mj,
+        laps_remaining=max(0, ctx.target_lap.total_laps - ctx.target_lap.lap),
+    )
+    feasible, rejected = feasible_actions(fin)
+    ctx.candidate_actions = [a.value for a in CandidateAction]
+    ctx.feasible_actions = [a.value for a in feasible]
+    ctx.rejected_alternatives = [{"action": a, "reason": r} for a, r in rejected]
+
+
 def _run_planner(ctx: DecisionContext) -> None:
     cfg = ctx.config
     planner = MonteCarloPlanner(config=cfg.planner_config(), seed=cfg.seed)
     pc = PlanningContext(
         gap_to_car_ahead_s=ctx.target_lap.gap_to_car_ahead_s,
         rival_soc_estimate=ctx.rival.estimate if ctx.rival else None,
+        p_defend=ctx.rival.p_defend if ctx.rival else None,
     )
     ctx.planner_result = planner.plan(ctx.gate_result, pc)
     ctx._planner = planner  # kept for the confidence gate (raw samples)
@@ -233,24 +298,44 @@ def _run_horizon(ctx: DecisionContext) -> None:
     cfg = ctx.config
     engine = OpportunityEngine(config=cfg.horizon_config(), seed=cfg.seed)
     ti = to_telemetry_input(ctx.target_lap, overtake_qualified_last_lap=ctx.overtake_bonus_banked)
+    e = ctx.energy
+
+    feasible_delays = {
+        CANDIDATE_DELAY[CandidateAction(a)]
+        for a in ctx.feasible_actions
+        if a in {ca.value for ca in CANDIDATE_DELAY}
+    }
+    # ATTACK_NOW (delay 0) is always evaluated as the reference even when infeasible —
+    # "would attacking now beat waiting?" is the whole question.
+    restrict = feasible_delays | {0}
+    improving = ctx.window is not None and ctx.window.opportunity_trend == "IMPROVING"
+
     ctx.horizon_result = engine.evaluate(
         ti,
         ctx.gate_result,
         ctx.rival.estimate if ctx.rival else None,
         window_strength_by_delay=_window_strength(ctx),
+        start_soc_mj=e.soc_mj if e else None,
+        laps_remaining=max(0, ti.total_laps - ti.lap_number),
+        reserve_floor_mj=cfg.reserve_floor_mj,
+        overtake_reward_s=cfg.overtake_reward_s,
+        future_window_bias=cfg.future_window_bias_s if improving else 0.0,
+        restrict_to_delays=restrict,
     )
+    ctx.opportunity_uncertain = _opportunity_uncertain(ctx)
 
 
 def _window_strength(ctx: DecisionContext) -> dict:
     """
     How well does an overtake window hold up N laps from now?
 
-    Default is mild decay (a bird in the hand — windows pass). It decays LESS when
-    the rival is confidently in a LOW energy state (they are not recovering, so a
-    later attempt is nearly as good) and MORE when the rival estimate is uncertain
-    or shows medium/high reserve. This is how rival-energy uncertainty reaches the
-    timing decision. MODEL_ASSUMPTION — a richer gap/rival-trajectory forecast is a
-    calibration follow-up.
+    Base is mild decay (a bird in the hand). It decays LESS when the rival is
+    confidently LOW (not recovering) and MORE when the estimate is uncertain or
+    the rival has reserve. The event-time window then adjusts: an IMPROVING
+    situation (gap closing, rival fading) can make future windows *stronger* than
+    now (>1.0), a DECAYING one accelerates the decay. This is the path by which
+    rival-state uncertainty AND short-horizon trends reach the timing decision.
+    MODEL_ASSUMPTION.
     """
     per_lap = 0.92
     if ctx.rival is not None:
@@ -258,7 +343,27 @@ def _window_strength(ctx: DecisionContext) -> dict:
             per_lap = 0.985
         elif ctx.rival.uncertain or ctx.rival.bucket == "HIGH":
             per_lap = 0.85
+    if ctx.window is not None:
+        if ctx.window.opportunity_trend == "IMPROVING":
+            per_lap = min(1.03, per_lap + 0.05)
+        elif ctx.window.opportunity_trend == "DECAYING":
+            per_lap = max(0.82, per_lap - 0.08)
     return {d: round(per_lap ** d, 4) for d in ctx.config.delay_laps}
+
+
+def _opportunity_uncertain(ctx: DecisionContext) -> bool:
+    """The horizon can't tell the strategies apart -> the opportunity is ambiguous."""
+    h = ctx.horizon_result
+    if h is None or len(h.ranked_strategies) < 2:
+        return False
+    if h.future_energy_value_active:
+        best, second = h.ranked_strategies[0], h.ranked_strategies[1]
+        spread = abs(best.strategic_value - second.strategic_value)
+    else:
+        best, second = h.ranked_strategies[0], h.ranked_strategies[1]
+        spread = abs(best.mean_horizon_delta_s - second.mean_horizon_delta_s)
+    top_std = h.ranked_strategies[0].std_horizon_delta_s
+    return spread < 0.02 and top_std > 1.0
 
 
 def _run_confidence(ctx: DecisionContext) -> None:
@@ -268,11 +373,14 @@ def _run_confidence(ctx: DecisionContext) -> None:
         recent_laptime_std_s=0.25,
         gap_to_car_ahead_s=ctx.target_lap.gap_to_car_ahead_s,
     )
+    dq = ctx.data_quality.quality_score if ctx.data_quality else 1.0
     ctx.confidence_result = gate.evaluate(
         ctx.planner_result,
         driver_load=load,
         rival_estimate=ctx.rival.estimate if ctx.rival else None,
         planner=getattr(ctx, "_planner", None),
+        data_quality_score=dq,
+        opportunity_uncertain=ctx.opportunity_uncertain,
     )
 
 
@@ -290,11 +398,22 @@ def _fuse(ctx: DecisionContext) -> None:
     cg_mode = cgr.recommended_mode
     cg_aggressive = cg_mode in _AGGRESSIVE
 
-    prefers_wait, wait_n = _horizon_prefers_wait(ctx)
     can_afford = bool(ctx.energy and ctx.energy.can_afford_aggressive)
     reserve_low = bool(ctx.energy and ctx.energy.reserve_low)
     behind = ctx.target_lap.gap_to_car_behind_s
     defending = behind is not None and behind <= _DEFEND_GAP_S
+
+    # A banked bonus + a model-confident window + the energy to use it is the moment
+    # ChronoPace exists to catch — only defer it for a SUBSTANTIALLY better future
+    # window (3x the normal decisive margin), never a marginal one.
+    window_is_prime = (
+        ctx.overtake_bonus_banked
+        and can_afford
+        and ctx.ml_overtake_prob is not None
+        and ctx.ml_overtake_prob >= cfg.ml_prob_high
+    )
+    prefers_wait, wait_n = _horizon_prefers_wait(ctx, margin_mult=3.0 if window_is_prime else 1.0)
+    ctx.prefers_wait, ctx.wait_n = prefers_wait, wait_n
 
     def _hold_mode() -> DeploymentMode:
         if reserve_low and DeploymentMode.CONSERVE_MODE in legal:
@@ -315,13 +434,19 @@ def _fuse(ctx: DecisionContext) -> None:
             action = "CONSERVE" if final_mode == DeploymentMode.CONSERVE_MODE else "HOLD"
         else:
             final_mode, action = DeploymentMode.BALANCED_MODE, "HOLD"
+    elif cg_aggressive and prefers_wait and f"WAIT_{wait_n}_LAPS" in ctx.feasible_actions:
+        # the horizon values a future window more than attacking now, AND that wait
+        # is feasible (energy recovers during it) -> defer, deploy conservatively now
+        final_mode = _hold_mode()
+        action = f"WAIT_{wait_n}_LAPS"
     elif cg_aggressive and not can_afford:
-        # "is the attack worth the energy?" — no.
+        # "is the attack worth the energy?" — no, and no feasible wait either.
         final_mode = _hold_mode()
         action = "CONSERVE" if final_mode == DeploymentMode.CONSERVE_MODE else "HOLD"
     elif cg_aggressive and prefers_wait:
+        # prefers a future window but the wait isn't feasible -> just hold
         final_mode = _hold_mode()
-        action = f"WAIT_{wait_n}_LAPS"
+        action = "CONSERVE" if final_mode == DeploymentMode.CONSERVE_MODE else "HOLD"
     elif cg_aggressive:
         final_mode, action = cg_mode, "ATTACK_NOW"
     else:
@@ -338,6 +463,12 @@ def _fuse(ctx: DecisionContext) -> None:
             final_mode = legal[0]
         action = "HOLD"
 
+    # guardrail: a WAIT action must correspond to a feasible candidate
+    if action.startswith("WAIT_") and ctx.feasible_actions:
+        want = f"WAIT_{wait_n}_LAPS"
+        if want not in ctx.feasible_actions:
+            final_mode, action = _hold_mode(), "HOLD"
+
     ctx.final_mode = final_mode.value
     ctx.action = action
 
@@ -351,6 +482,7 @@ def _fuse(ctx: DecisionContext) -> None:
         override_reason=cgr.override_reason,
         rival_bucket=ctx.rival.bucket if ctx.rival else None,
         rival_estimate_uncertain=ctx.rival.uncertain if ctx.rival else False,
+        rival_p_defend=ctx.rival.p_defend if ctx.rival else 0.0,
         horizon_strategy=h.recommended_strategy,
         horizon_prefers_wait=prefers_wait,
         energy_reserve_low=ctx.energy.reserve_low if ctx.energy else False,
@@ -358,11 +490,13 @@ def _fuse(ctx: DecisionContext) -> None:
         ml_overtake_prob=ctx.ml_overtake_prob,
         ml_prob_high=cfg.ml_prob_high,
         ml_prob_low=cfg.ml_prob_low,
+        data_quality_status=ctx.data_quality.status if ctx.data_quality else "GOOD",
+        opportunity_ambiguous=ctx.opportunity_uncertain,
     )
     ctx.reason_codes = rc.select(ri)
 
 
-def _horizon_prefers_wait(ctx: DecisionContext) -> tuple[bool, int]:
+def _horizon_prefers_wait(ctx: DecisionContext, margin_mult: float = 1.0) -> tuple[bool, int]:
     h = ctx.horizon_result
     if h is None or not h.recommended_strategy.startswith("WAIT"):
         return False, 0
@@ -372,8 +506,12 @@ def _horizon_prefers_wait(ctx: DecisionContext) -> tuple[bool, int]:
     best = h.ranked_strategies[0]
     if attack_now is None:
         return False, 0
-    margin = attack_now.mean_horizon_delta_s - best.mean_horizon_delta_s
-    if margin < ctx.config.horizon_decisive_margin_s:
+    if h.future_energy_value_active:
+        # strategic_value: higher is better; best beats ATTACK_NOW by this much
+        margin = best.strategic_value - attack_now.strategic_value
+    else:
+        margin = attack_now.mean_horizon_delta_s - best.mean_horizon_delta_s
+    if margin < ctx.config.horizon_decisive_margin_s * margin_mult:
         return False, 0
     try:
         n = int(h.recommended_strategy.split("_")[1])
@@ -416,12 +554,15 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             estimate_uncertain=r.uncertain,
             bucket=r.bucket,
             distribution={k: round(v, 4) for k, v in r.distribution.items()},
+            freshness_laps=r.freshness_laps,
+            p_defend=r.p_defend,
         )
     else:
         rival_block = RivalBlock(
             mean_reserve_mj=0.0, reserve_std_mj=0.0, n_observations=0,
             confidence=0.0, estimate_uncertain=True, bucket="MEDIUM",
             distribution={"low": 0.0, "medium": 1.0, "high": 0.0},
+            freshness_laps=len(ctx.lap_history), p_defend=0.0,
         )
 
     ranked = [
@@ -430,17 +571,25 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             mean_horizon_delta_s=s.mean_horizon_delta_s,
             std_horizon_delta_s=s.std_horizon_delta_s,
             ci_lower_s=s.confidence_ci_lower_s,
+            end_soc_mj=s.end_soc_mj, energy_spent_mj=s.energy_spent_mj,
+            current_opportunity_value=s.current_opportunity_value,
+            future_opportunity_value=s.future_opportunity_value,
+            energy_opportunity_cost=s.energy_opportunity_cost,
+            strategic_value=s.strategic_value,
         )
         for s in h.ranked_strategies
     ]
     cur_prob = round(float(ctx.ml_overtake_prob or 0.0), 4)
-    prefers_wait, wait_n = _horizon_prefers_wait(ctx)
+    prefers_wait, wait_n = ctx.prefers_wait, ctx.wait_n
     proj_prob = round(min(1.0, cur_prob * 1.12), 4) if prefers_wait else cur_prob
     opportunity_block = OpportunityBlock(
         recommended_strategy=h.recommended_strategy,
         prefers_wait=prefers_wait,
         foregone_strategy=h.foregone_strategy,
         foregone_value_gap_s=h.foregone_value_gap_s,
+        future_energy_value_active=h.future_energy_value_active,
+        opportunity_uncertain=ctx.opportunity_uncertain,
+        opportunity_trend=ctx.window.opportunity_trend if ctx.window else "STABLE",
         current_window_overtake_prob=cur_prob,
         projected_window_overtake_prob=proj_prob,
         projected_window_lap=(nl.lap + wait_n) if prefers_wait else None,
@@ -473,9 +622,31 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         practical_significance_passed=cgr.practical_significance_passed,
         dcli_passed=cgr.dcli_passed,
         rival_confidence_passed=cgr.rival_confidence_passed,
+        data_quality_passed=getattr(cgr, "data_quality_passed", True),
         ci_lower_bound_s=cgr.ci_lower_bound_s,
         t_statistic=cgr.t_statistic,
         dcli_score=cgr.dcli_score,
+    )
+
+    dq = ctx.data_quality
+    dq_block = DataQualityBlock(
+        status=dq.status, quality_score=dq.quality_score, freshness_laps=dq.freshness_laps,
+        dropped_samples=dq.dropped_samples, out_of_order=dq.out_of_order,
+        missing_fields=dq.missing_fields, checks=dq.checks,
+    )
+    w = ctx.window
+    window_block = WindowBlock(
+        n_laps=w.n_laps, speed_trend_kmh_per_lap=w.speed_trend_kmh_per_lap,
+        gap_ahead_trend_s_per_lap=w.gap_ahead_trend_s_per_lap,
+        soc_trend_mj_per_lap=w.soc_trend_mj_per_lap,
+        rival_terminal_speed_trend=w.rival_terminal_speed_trend,
+        rival_sector_delta_trend=w.rival_sector_delta_trend,
+        closing=w.closing, opportunity_trend=w.opportunity_trend,
+    )
+    constraints_block = ConstraintsBlock(
+        regulatory="PASS" if compliance_block.legal else "FAIL",
+        data_quality=dq.status,
+        energy="RESERVE_LOW" if (ctx.energy and ctx.energy.reserve_low) else "OK",
     )
 
     decision_block = DecisionBlock(
@@ -490,22 +661,45 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
     meta = SnapshotMeta(
         lap=nl.lap, total_laps=nl.total_laps, data_mode=nl.data_mode,
         source_detail=source_detail, seed=ctx.seed,
+        pipeline_version=PIPELINE_VERSION,
+        config_fingerprint=_config_fingerprint(ctx.config),
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
 
     return DecisionSnapshot(
         meta=meta,
         decision=decision_block,
+        data_quality=dq_block,
+        window=window_block,
         energy=energy_block,
         rival=rival_block,
         opportunity=opportunity_block,
         monte_carlo=mc_block,
         compliance=compliance_block,
         confidence=confidence_block,
+        constraints=constraints_block,
+        candidate_actions=list(ctx.candidate_actions),
+        feasible_actions=list(ctx.feasible_actions),
+        rejected_alternatives=[RejectedAlternative(**r) for r in ctx.rejected_alternatives],
         reason_codes=list(ctx.reason_codes),
         reasons=[rc.describe(c) for c in ctx.reason_codes],
         trace=build_trace(ctx),
     )
+
+
+def _config_fingerprint(cfg: DecisionConfig) -> str:
+    import dataclasses
+    import hashlib
+
+    payload = {"pipeline": PIPELINE_VERSION, **dataclasses.asdict(cfg)}
+    try:
+        from app.ml.predict import model_info
+
+        payload["ml"] = model_info().get("dataset_hash", "none")
+    except Exception:
+        payload["ml"] = "none"
+    blob = repr(sorted(payload.items())).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def _compliance_block(ctx: DecisionContext) -> ComplianceBlock:

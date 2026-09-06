@@ -1,7 +1,8 @@
 """
 confidence_gate.py — Stage 3: Confidence Gate
 
-Two-part significance test + DCLI + rival-confidence check.
+Two-part significance test + DCLI + rival-confidence + data-quality check
+(five gates; the fifth is optional and defaulted so older callers are unaffected).
 
 WHY a plain t-test doesn't work here:
   With n_iterations fixed at 10,000, standard error s/√n is tiny — almost any
@@ -55,6 +56,10 @@ class ConfidenceGateConfig:
     # Rival confidence threshold
     rival_confidence_threshold_mj: float = 1.5
 
+    # Data-quality gate: below this quality_score (0..1) an aggressive
+    # recommendation is not trusted. MODEL_ASSUMPTION.
+    data_quality_pass_threshold: float = 0.6
+
 
 class DriverLoadInput(BaseModel):
     laps_since_last_mode_change: float = Field(..., ge=0.0)
@@ -84,6 +89,7 @@ class ConfidenceGateResult(BaseModel):
     dcli_passed: bool
 
     rival_confidence_passed: bool
+    data_quality_passed: bool = True
 
     overridden: bool
     override_reason: str  # names ALL failing gates
@@ -113,9 +119,17 @@ class ConfidenceGate:
         driver_load: Optional[DriverLoadInput] = None,
         rival_estimate: Optional[RivalSocEstimate] = None,
         planner: Optional[MonteCarloPlanner] = None,
+        data_quality_score: float = 1.0,
+        opportunity_uncertain: bool = False,
     ) -> ConfidenceGateResult:
         """
-        Evaluate all four gates. Override to BALANCED_MODE if any fail.
+        Evaluate the gates and override to BALANCED_MODE if any fail.
+
+        `data_quality_score` (0..1) and `opportunity_uncertain` are optional inputs
+        from the Data Quality Gate and the Opportunity Horizon. Bad/stale telemetry
+        or an ambiguous opportunity makes the gate abstain — the system's way of
+        saying it does not know enough. Defaults (1.0, False) leave behaviour
+        unchanged.
         """
         cfg = self.config
         _planner = planner or self._planner
@@ -191,6 +205,11 @@ class ConfidenceGate:
             or rival_estimate.std_soc_mj <= cfg.rival_confidence_threshold_mj
         )
 
+        # Gate 5: Data quality / opportunity clarity
+        data_quality_passed = (
+            data_quality_score >= cfg.data_quality_pass_threshold and not opportunity_uncertain
+        )
+
         failing = []
         if not stat_passed:
             failing.append("STATISTICAL_RELIABILITY")
@@ -200,6 +219,8 @@ class ConfidenceGate:
             failing.append("DCLI")
         if not rival_passed:
             failing.append("RIVAL_CONFIDENCE")
+        if not data_quality_passed:
+            failing.append("DATA_QUALITY")
 
         overridden = bool(failing)
         final_mode = DeploymentMode.BALANCED_MODE if overridden else top_mode
@@ -216,6 +237,7 @@ class ConfidenceGate:
             dcli_score=round(dcli_score, 2),
             dcli_passed=dcli_passed,
             rival_confidence_passed=rival_passed,
+            data_quality_passed=data_quality_passed,
             overridden=overridden,
             override_reason=", ".join(failing) if failing else "",
             n_iterations=planner_result.n_iterations,

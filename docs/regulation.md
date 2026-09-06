@@ -35,9 +35,15 @@ if the two drift apart or if an assumption is silently promoted to `VERIFIED_FIA
 These live in `app/decision/config.py` (`DecisionConfig`) and are ChronoPace
 decision-*policy*, flagged `MODEL_ASSUMPTION` in code comments:
 
-- `horizon_decisive_margin_s = 0.15` — how much better a future window must look before the engine defers an attack.
-- `low_reserve_mj = 2.0`, `rival_low_soc_mj = 3.0`, `rival_high_soc_mj = 6.0` — energy / rival-state bucket edges.
+- `horizon_decisive_margin_s = 0.15` — how much better a future window must look before the engine defers an attack (×3 for a prime window).
+- `low_reserve_mj = 2.0`, `reserve_floor_mj = 1.0` — energy thresholds; a strategy may not deploy below the floor in the horizon.
+- `rival_low_soc_mj = 3.0`, `rival_high_soc_mj = 6.0` — rival-state bucket edges.
+- `window_laps = 5` — event-time sliding-window length.
+- `overtake_reward_s = 0.3`, `future_window_bias_s = 0.12` — Future Energy Value: laptime-equivalent value of taking a window, and the bonus for waiting when the trend is IMPROVING.
+- `data_quality_floor = 0.6` — below this `quality_score` the confidence gate abstains.
 - `_DEFEND_GAP_S = 1.0` (engine.py) — rearward gap under which PUSH-to-defend is justified.
+- `_HARVEST_PER_LAP = 0.35` (opportunity_engine.py), `harvest_per_lap_mj = 0.3` (actions.py) — modelled per-lap energy recovery for a non-attacking car.
+- `_p_defend(...)` (engine.py) — deterministic scalar P(rival defends) from rival SoC bucket + gap trend + estimate uncertainty. A small statistical input to the planner, **not** a behavioural model.
 - `ReplayEnergyModel` (normalizer.py) — turns a FastF1 lap's throttle/brake trace into a modelled SoC path, because **F1 publishes no ERS state of charge**. Every replayed lap carries `energy_is_modeled = True`.
 
 ## What still needs a human check

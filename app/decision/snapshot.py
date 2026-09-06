@@ -45,6 +45,40 @@ class RivalBlock(BaseModel):
     estimate_uncertain: bool
     bucket: str = Field(..., description="LOW | MEDIUM | HIGH — argmax of the distribution")
     distribution: dict = Field(..., description="{'low': p, 'medium': p, 'high': p}, sums to 1")
+    freshness_laps: int = Field(0, ge=0, description="Laps since the last usable rival observation")
+    p_defend: float = Field(0.0, ge=0.0, le=1.0, description="Deterministic P(rival actively defends)")
+
+
+class DataQualityBlock(BaseModel):
+    status: str = Field(..., description="GOOD | DEGRADED | INVALID")
+    quality_score: float = Field(..., ge=0.0, le=1.0)
+    freshness_laps: int
+    dropped_samples: int
+    out_of_order: bool
+    missing_fields: List[str]
+    checks: List[str]
+
+
+class WindowBlock(BaseModel):
+    n_laps: int
+    speed_trend_kmh_per_lap: float
+    gap_ahead_trend_s_per_lap: Optional[float]
+    soc_trend_mj_per_lap: Optional[float]
+    rival_terminal_speed_trend: Optional[float]
+    rival_sector_delta_trend: Optional[float]
+    closing: bool
+    opportunity_trend: str = Field(..., description="IMPROVING | STABLE | DECAYING")
+
+
+class RejectedAlternative(BaseModel):
+    action: str
+    reason: str
+
+
+class ConstraintsBlock(BaseModel):
+    regulatory: str = Field(..., description="PASS | FAIL")
+    data_quality: str = Field(..., description="GOOD | DEGRADED | INVALID")
+    energy: str = Field(..., description="OK | RESERVE_LOW")
 
 
 class OpportunityStrategy(BaseModel):
@@ -53,6 +87,12 @@ class OpportunityStrategy(BaseModel):
     mean_horizon_delta_s: float
     std_horizon_delta_s: float
     ci_lower_s: float
+    end_soc_mj: float = 0.0
+    energy_spent_mj: float = 0.0
+    current_opportunity_value: float = 0.0
+    future_opportunity_value: float = 0.0
+    energy_opportunity_cost: float = 0.0
+    strategic_value: float = 0.0
 
 
 class OpportunityBlock(BaseModel):
@@ -60,6 +100,9 @@ class OpportunityBlock(BaseModel):
     prefers_wait: bool
     foregone_strategy: str
     foregone_value_gap_s: float
+    future_energy_value_active: bool = False
+    opportunity_uncertain: bool = False
+    opportunity_trend: str = "STABLE"
     current_window_overtake_prob: float
     projected_window_overtake_prob: float
     projected_window_lap: Optional[int]
@@ -103,6 +146,7 @@ class ConfidenceBlock(BaseModel):
     practical_significance_passed: bool
     dcli_passed: bool
     rival_confidence_passed: bool
+    data_quality_passed: bool = True
     ci_lower_bound_s: float
     t_statistic: float
     dcli_score: float
@@ -119,6 +163,10 @@ class SnapshotMeta(BaseModel):
     data_mode: str
     source_detail: str
     seed: int
+    pipeline_version: str = "2.0"
+    config_fingerprint: str = Field(
+        "", description="Hash of DecisionConfig + pipeline version + ML model — same value ⇒ reproducible"
+    )
     generated_at: str = Field(..., description="Wall-clock only — excluded from determinism checks")
 
 
@@ -127,12 +175,18 @@ class DecisionSnapshot(BaseModel):
 
     meta: SnapshotMeta
     decision: DecisionBlock
+    data_quality: DataQualityBlock
+    window: WindowBlock
     energy: EnergyBlock
     rival: RivalBlock
     opportunity: OpportunityBlock
     monte_carlo: MonteCarloBlock
     compliance: ComplianceBlock
     confidence: ConfidenceBlock
+    constraints: ConstraintsBlock
+    candidate_actions: List[str]
+    feasible_actions: List[str]
+    rejected_alternatives: List[RejectedAlternative]
     reason_codes: List[str]
     reasons: List[str] = Field(..., description="Human strings for reason_codes, same order")
     trace: List[TraceStep]

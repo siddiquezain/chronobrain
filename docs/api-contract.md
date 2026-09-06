@@ -31,20 +31,33 @@ GET /api/v1/health   → { status, service, version, fastf1_available }
 
 ```jsonc
 {
-  "meta":       { "lap", "total_laps", "data_mode", "source_detail", "seed", "generated_at" },
+  "meta":       { "lap", "total_laps", "data_mode", "source_detail", "seed",
+                  "pipeline_version", "config_fingerprint", "generated_at" },
   "decision":   { "mode", "action", "confidence", "stage2_mode",
                   "confidence_overridden", "override_reason" },
+  "data_quality": { "status",            // GOOD | DEGRADED | INVALID
+                    "quality_score", "freshness_laps", "dropped_samples",
+                    "out_of_order", "missing_fields": [ ], "checks": [ ] },
+  "window":     { "n_laps", "speed_trend_kmh_per_lap", "gap_ahead_trend_s_per_lap",
+                  "soc_trend_mj_per_lap", "rival_terminal_speed_trend",
+                  "rival_sector_delta_trend", "closing",
+                  "opportunity_trend" },   // IMPROVING | STABLE | DECAYING
   "energy":     { "soc_mj", "soc_pct", "lap_start_soc_mj", "deployed_this_lap_mj",
                   "deployment_headroom_mj", "projected_reserve_mj",
                   "projected_end_of_race_mj", "can_afford_aggressive", "energy_is_modeled" },
   "rival":      { "mean_reserve_mj", "reserve_std_mj", "n_observations", "confidence",
                   "estimate_uncertain", "bucket",                     // LOW|MEDIUM|HIGH
-                  "distribution": { "low", "medium", "high" } },      // sums to 1
+                  "distribution": { "low", "medium", "high" },        // sums to 1
+                  "freshness_laps", "p_defend" },                     // P(rival actively defends)
   "opportunity":{ "recommended_strategy", "prefers_wait", "foregone_strategy",
-                  "foregone_value_gap_s", "current_window_overtake_prob",
+                  "foregone_value_gap_s", "future_energy_value_active", "opportunity_uncertain",
+                  "opportunity_trend", "current_window_overtake_prob",
                   "projected_window_overtake_prob", "projected_window_lap",
                   "ranked_strategies": [ { "name","delay_laps","mean_horizon_delta_s",
-                                           "std_horizon_delta_s","ci_lower_s" } ],
+                                           "std_horizon_delta_s","ci_lower_s",
+                                           "end_soc_mj","energy_spent_mj",
+                                           "current_opportunity_value","future_opportunity_value",
+                                           "energy_opportunity_cost","strategic_value" } ],
                   "uncertainty_note" },
   "monte_carlo":{ "n_iterations", "seed", "recommended_mode",
                   "ranked_modes": [ { "mode","mean_laptime_delta_s","std_laptime_delta_s",
@@ -52,8 +65,14 @@ GET /api/v1/health   → { status, service, version, fastf1_available }
   "compliance": { "legal", "legal_modes", "illegal_modes",
                   "checks": [ { "rule","provenance","status","detail" } ] },  // provenance: VERIFIED_FIA|MODEL_ASSUMPTION|DEMO_CONSTANT
   "confidence": { "overall","statistical_reliability_passed","practical_significance_passed",
-                  "dcli_passed","rival_confidence_passed","ci_lower_bound_s",
-                  "t_statistic","dcli_score" },
+                  "dcli_passed","rival_confidence_passed","data_quality_passed",
+                  "ci_lower_bound_s","t_statistic","dcli_score" },
+  "constraints": { "regulatory",          // PASS | FAIL
+                   "data_quality",         // GOOD | DEGRADED | INVALID
+                   "energy" },             // OK | RESERVE_LOW
+  "candidate_actions":     [ "ATTACK_NOW","WAIT_2_LAPS","WAIT_5_LAPS","CONSERVE","HOLD" ],
+  "feasible_actions":      [ "..." ],      // the subset that survived legality + energy
+  "rejected_alternatives": [ { "action","reason" } ],
   "reason_codes": [ "..." ],          // deterministic; from app/decision/reason_codes.VOCAB
   "reasons":      [ "..." ],          // human strings, same order
   "trace":        [ { "stage","detail" } ],   // deterministic decision trace
