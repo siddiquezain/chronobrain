@@ -1,6 +1,6 @@
 """Race state endpoints."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
@@ -25,6 +25,6 @@ async def update_race_state(update: RaceStateUpdate) -> RaceState:
     current = mgr.get_race_state() or {}
     patch = {k: v for k, v in update.model_dump().items() if v is not None}
     current.update(patch)
-    current.setdefault("timestamp", datetime.utcnow().isoformat())
+    current.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
     mgr.update_race_state(current)
     return RaceState(**current)

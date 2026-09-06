@@ -1,0 +1,5 @@
+# Optional — historical telemetry replay via FastF1.
+# The core engine and test suite do NOT need this; app/data/fastf1_service.py
+# imports fastf1 lazily and app.data.FASTF1_AVAILABLE reports whether it loaded.
+-r requirements.txt
+fastf1==3.4.4

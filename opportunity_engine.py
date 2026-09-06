@@ -96,9 +96,19 @@ class OpportunityEngine:
         current_telemetry: TelemetryInput,
         gate_result: GateResult,
         rival_estimate: Optional[RivalSocEstimate] = None,
+        window_strength_by_delay: Optional[dict] = None,
     ) -> HorizonResult:
-        """Evaluate candidate multi-lap strategies and return ranked outcomes."""
+        """
+        Evaluate candidate multi-lap strategies and return ranked outcomes.
+
+        `window_strength_by_delay` (optional): {delay_laps: strength} where strength
+        scales the laptime advantage of that strategy's ARM/USE_OVERTAKE_BONUS laps.
+        1.0 = neutral. A caller that believes the window will be stronger in 2 laps
+        than now passes e.g. {0: 1.0, 2: 1.3}. Omitted -> all strengths 1.0 and
+        behaviour is byte-identical to before this parameter existed.
+        """
         cfg = self.config
+        self._window_strength = window_strength_by_delay or {}
 
         strategies: list[tuple[str, int]] = [(HOLD_STRATEGY, -1)]
         for d in sorted(cfg.delay_laps):
@@ -156,6 +166,8 @@ class OpportunityEngine:
 
         total_samples = np.zeros(n)
 
+        strength = getattr(self, "_window_strength", {}).get(max(delay, 0), 1.0)
+
         for lap_offset in range(horizon):
             mode = self._strategy_lap_mode(strategy_name, delay, lap_offset, gate_result)
             uncertainty_scale = 1.0 + pc.horizon_uncertainty_growth * lap_offset
@@ -166,6 +178,14 @@ class OpportunityEngine:
                 dyn.std_laptime_delta_s * uncertainty_scale,
                 n,
             )
+            # Scale the attack laps' advantage by how strong the window is at this
+            # strategy's chosen moment (1.0 when the caller supplies nothing).
+            if strength != 1.0 and mode in (
+                DeploymentMode.ARM_OVERTAKE_MODE,
+                DeploymentMode.USE_OVERTAKE_BONUS_MODE,
+            ):
+                lap_samples = lap_samples * strength
+
             total_samples += lap_samples
 
         return float(np.mean(total_samples)), float(np.std(total_samples))

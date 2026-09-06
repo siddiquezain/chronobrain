@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 from app.api.websocket import broadcast
 from app.core.state import get_race_state_manager
+from app.data.providers import build_provider
+from app.decision import DecisionConfig, run_decision
 from app.simulation.scenarios import SCENARIO_PRESETS, get_scenario_config
 from app.simulation.simulator import RaceSimulator
 
@@ -31,6 +33,12 @@ async def _run_simulation(scenario: str, tick_interval_s: float, seed: int) -> N
     config = get_scenario_config(scenario, seed=seed)
     sim = RaceSimulator(config=config, seed=seed)
 
+    # Canonical decision snapshots stream alongside the legacy payload so the
+    # frontend has one authoritative source of truth per tick.
+    dcfg = DecisionConfig(seed=seed)
+    provider = build_provider("synthetic", scenario=scenario, seed=seed, total_laps=config.total_laps)
+    lap_no = 0
+
     try:
         while True:
             try:
@@ -38,6 +46,13 @@ async def _run_simulation(scenario: str, tick_interval_s: float, seed: int) -> N
             except StopIteration:
                 logger.info("Simulation complete — all laps done")
                 break
+
+            lap_no += 1
+            try:
+                snap = run_decision(provider, lap=lap_no, config=dcfg)
+                payload["decision_snapshot"] = snap.model_dump()
+            except Exception as exc:  # noqa: BLE001 - never let one lap kill the stream
+                logger.warning("snapshot for lap %s failed: %s", lap_no, exc)
 
             mgr.update_race_state(payload["race_state"])
             mgr.update_energy(payload["energy"])

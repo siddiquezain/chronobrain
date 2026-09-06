@@ -28,7 +28,7 @@ Simulates 10,000 race trajectories per legal mode using NumPy's seeded RNG.
 - Rival SoC modulation: when a `RivalSocEstimate` is available, mode utilities are adjusted based on estimated rival energy state
 - Sharpe ratio selection capped at ±999 prevents numerical explosion when std ≈ 0
 
-**Mode dynamics** (`DEFAULT_MODE_DYNAMICS`) are engineered illustrative values — not measured from real Formula E PU data. They encode the structural relationships (PUSH is faster but costs more energy; CONSERVE is slower but saves energy) without claiming empirical precision.
+**Mode dynamics** (`DEFAULT_MODE_DYNAMICS`) are engineered illustrative values — not measured from real Formula 1 PU data. They encode the structural relationships (PUSH is faster but costs more energy; CONSERVE is slower but saves energy) without claiming empirical precision.
 
 ## Stage 3 — Confidence Gate
 
@@ -69,4 +69,4 @@ Update step: 4-signal Gaussian likelihood, systematic resampling.
 
 RandomForestClassifier (100 trees, seed=42) trained on synthetic data with 8 features. Used to improve overtake probability estimates in the overtake engine.
 
-**Why synthetic data?** Real Formula E overtake outcome data is not publicly available at the resolution required. The synthetic dataset encodes structural domain knowledge (small gap + high closing speed + DRS → higher success probability) while keeping the classifier interface ready for real data when available.
+**Why synthetic data?** Real Formula 1 overtake outcome data is not publicly available at the resolution required. The synthetic dataset encodes structural domain knowledge (small gap + high closing speed + DRS → higher success probability) while keeping the classifier interface ready for real data when available.

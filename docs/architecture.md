@@ -2,86 +2,116 @@
 
 ## Overview
 
-ChronoPace is a decision-support engine that answers: **"Is this moment worth spending finite electrical energy?"**
+ChronoPace is a decision-support engine that answers: **"Is this moment worth
+spending finite electrical energy?"** — not just *where* to deploy, but *whether
+the spend is worth it at all* versus a better future opportunity.
 
-It processes real-time Formula E telemetry through a deterministic 4-stage intelligence pipeline and broadcasts strategy recommendations over WebSocket.
+It processes **2026 Formula 1** telemetry (historical FastF1 replay **or** the
+synthetic simulator) through a deterministic pipeline and returns one authoritative
+`DecisionSnapshot`.
 
-## Directory Structure
-
-```
-ChronoPace-Backend/
-├── rule_gate.py            # Stage 1 — FIA 2026 Regulatory Gate
-├── rival_estimator.py      # Particle filter rival SoC estimation
-├── planner.py              # Stage 2 — Monte Carlo lap-time planner
-├── confidence_gate.py      # Stage 3 — Statistical + DCLI significance filter
-├── opportunity_engine.py   # Multi-lap horizon comparison (ATTACK_NOW / WAIT / HOLD)
-├── narrator.py             # Stage 4 — Structured narrative + optional Claude haiku
-├── telemetry_simulator.py  # Scenario-based simulation telemetry
-├── app/                    # FastAPI service layer
-│   ├── main.py             # App entry point
-│   ├── api/                # HTTP routes + WebSocket
-│   ├── core/               # Config, logging, state
-│   ├── engines/            # Stateless computation engines
-│   ├── ml/                 # RandomForest overtake success classifier
-│   ├── models/             # Pydantic data models
-│   ├── pipeline/           # Ingestion → preprocessing → engines
-│   ├── simulation/         # Scenario config + tick simulator
-│   └── utils/              # Math helpers and validation
-```
-
-## Intelligence Pipeline
+## The invariant
 
 ```
-Telemetry
-    │
-    ▼
-Stage 1: RegulatoryGate (rule_gate.py)
-    • FIA 2026 Art.5.4.10 — deployment cap (9 MJ/lap)
-    • FIA 2026 Art.5.4.9  — SoC swing cap (4 MJ)
-    • Proximity check     — gap ≤ 1.0s for overtake modes
-    • Bonus banking       — overtake_qualified_last_lap flag
-    → GateResult (legal_modes, violations, base_cap_mj)
-    │
-    ▼
-Stage 2: MonteCarloPlanner (planner.py)
-    • 10,000 iterations, FIXED — seeded via SeedSequence.spawn(5)
-    • 5 canonical mode streams — byte-identical across runs
-    • Rival SoC modulation via RivalStateEstimator particle filter
-    • Sharpe ratio selection, capped ±999
-    → PlannerResult (mode_results, recommended_mode, run_id)
-    │
-    ▼
-Stage 3: ConfidenceGate (confidence_gate.py)
-    • Statistical reliability — Welch t-test (p < 0.05)
-    • Practical significance — |Δlaptime| > 0.05s, |ΔP(overtake)| > 3pp
-    • DCLI — Driver Cognitive Load Index ≤ 60.0
-    • Rival confidence — rival SoC std ≤ 1.5 MJ
-    • Override: falls back to BALANCED_MODE naming all failing gates
-    → ConfidenceGateResult
-    │
-    ▼
-Stage 4: Narrator (narrator.py)
-    • build_reason_codes() — fixed 13-code vocabulary
-    • derive_confidence()  — deterministic from CI margin
-    • narrate()            — Claude haiku if ANTHROPIC_API_KEY, else structured fallback
-    → StrategyCall (decision, confidence, reason_codes, narration)
+              PYTHON  =  COMPUTATION / TRUTH
+              LLM     =  EXPLANATION ONLY
 ```
 
-## Sign Convention (Critical)
+Every number — energy, probabilities, rival state, opportunity ranking, Monte
+Carlo outcomes, legality, confidence, the final mode — is produced by
+deterministic Python **before** the narrator runs. The LLM is handed a finished
+`DecisionSnapshot` and may only write `snapshot.narrative`. It cannot change a
+mode, a probability, or a compliance result. If the LLM is unavailable, a
+structured fallback fills `narrative` and nothing else changes.
 
-The Monte Carlo planner uses: **diff = mean(runner_up) - mean(top)**
+## End-to-end flow
 
-Negative delta = runner_up is faster (smaller lap time) than top. This is intentional — lower lap time is better.
+```
+        TELEMETRY SOURCES
+   ┌───────────────┴───────────────┐
+FastF1 historical replay      Synthetic simulator
+(app/data/fastf1_service.py)  (telemetry_simulator.py)
+   │  session load, DataFrame,     │
+   │  DRS/throttle coding,         │
+   │  driver/session selection     │
+   └───────────────┬───────────────┘
+                   ▼
+        TELEMETRY NORMALIZER        app/data/normalizer.py
+        TelemetrySample[] → NormalizedLap
+                   ▼
+        ┌──────────────────────────────────────────┐
+        │  DECISION PIPELINE  (app/decision/engine) │
+        │                                          │
+        │  feature extraction (energy, ML P(o/t))   │
+        │  rival particle filter  (rival_estimator) │
+        │  Stage 1  RegulatoryGate  (rule_gate)     │  legality only
+        │  Stage 2  MonteCarloPlanner (planner)     │  ranks legal modes
+        │           OpportunityEngine               │  ATTACK_NOW / WAIT_N / HOLD
+        │  Stage 3  ConfidenceGate                  │  may override → BALANCED
+        │  DECISION ENGINE (fusion)                 │  final mode + action + codes
+        └──────────────────────┬───────────────────┘
+                   ▼
+        DecisionSnapshot  (verified JSON)  ── + DecisionTrace
+                   ▼
+        Stage 4  LLM Narrator   app/narrative/narrator.py   (optional, additive)
+                   ▼
+        POST /api/v1/decision  →  React frontend
+```
 
-## Key Constants (FIA 2026)
+## Modules
 
-| Constant | Value | Regulation |
-|---------|-------|------------|
-| `max_deployment_per_lap_mj` | 9.0 MJ | Art. 5.4.10 |
-| `max_delta_soc_mj` | 4.0 MJ | Art. 5.4.9 |
-| `overtake_bonus_mj` | 0.5 MJ | Bonus pool |
-| `overtake_detection_gap_threshold_s` | 1.0 s | Proximity |
+Stack A — the intelligence core (repo root, unchanged contracts):
 
-## One-Way Import Law
+| File | Role |
+|---|---|
+| `rule_gate.py` | Stage 1 — regulatory legality only. Never imports `rival_estimator`. |
+| `rival_estimator.py` | 1000-particle filter → `RivalSocEstimate(mean, std)`. |
+| `planner.py` | Stage 2 — 10,000-iteration Monte Carlo, `SeedSequence.spawn(5)` in canonical mode order. |
+| `opportunity_engine.py` | Multi-lap `ATTACK_NOW / WAIT_N / HOLD` comparison; uncertainty widens with horizon distance. |
+| `confidence_gate.py` | Stage 3 — statistical + practical significance + DCLI + rival-confidence; override → `BALANCED_MODE`. |
+| `narrator.py` | Stack A Stage 4 helpers (`build_reason_codes`, `derive_confidence`). |
+| `telemetry_simulator.py` | Deterministic scenario generator (A–E). |
 
-`rule_gate.py` must **never** import from `rival_estimator.py`. The regulatory gate is a pure function of telemetry; rival uncertainty must not influence legality checks.
+New in `app/`:
+
+| Path | Role |
+|---|---|
+| `app/data/` | Telemetry provider abstraction: `TelemetrySample`, `NormalizedLap`, `SyntheticProvider`, `ReplayProvider`, `fastf1_service` (the only module that imports `fastf1`). |
+| `app/decision/` | `run_decision()` orchestrator, `DecisionConfig`, `DecisionContext`, unified `reason_codes`, `DecisionSnapshot`, `DecisionTrace`, the fusion step. |
+| `app/narrative/` | Stage 4 — `narrate(snapshot)`; the only place a language model runs. |
+| `app/regulation/` | Provenance catalogue for every `GateConfig` constant (see `docs/regulation.md`). |
+| `app/engines/` | Legacy Stack B engines (energy/overtake/ML feature extractors + legacy `StrategyEngine`). `EnergyEngine`/`OvertakeEngine`/ML feed the new pipeline; `StrategyEngine`/`RiskEngine`/`AppRegulatoryGate` remain only behind the pre-existing GET endpoints. |
+
+## Five deployment modes (fixed)
+
+`CONSERVE_MODE`, `BALANCED_MODE`, `ARM_OVERTAKE_MODE`, `USE_OVERTAKE_BONUS_MODE`,
+`PUSH_MODE`. `ARM` = qualify/prepare the Overtake-Mode bonus for next lap;
+`USE_OVERTAKE_BONUS` = spend a bonus banked last lap. They are **not** merged.
+
+The decision engine also emits a user-facing `action`:
+`ATTACK_NOW | WAIT_2_LAPS | WAIT_5_LAPS | HOLD | PUSH | CONSERVE`.
+
+## Determinism
+
+`same NormalizedLap list + same DecisionConfig + same seed ⇒ byte-identical
+DecisionSnapshot` (excluding `meta.generated_at`). All randomness is seeded
+(`np.random.default_rng` / `SeedSequence`) from `DecisionConfig.seed`. The single-
+lap API replays laps 1..N each call rather than caching mutable state, so results
+never depend on call history. Enforced by `tests/test_decision_determinism.py`.
+
+## Sign convention (critical)
+
+Monte Carlo / confidence gate use **`diff = mean(runner_up) − mean(top)`**
+(runner-up first). Negative delta = faster. Reversing the subtraction silently
+inverts the gate; `test_integration.py` checks it explicitly.
+
+## Regulatory constants
+
+See **[docs/regulation.md](regulation.md)** — every constant is tagged
+`VERIFIED_FIA` / `MODEL_ASSUMPTION` / `DEMO_CONSTANT` and cross-checked against
+`GateConfig` by `test_regulation_provenance.py`.
+
+## One-way import law
+
+`rule_gate.py` must **never** import from `rival_estimator.py`. Legality is a pure
+function of the car's own verified telemetry; rival uncertainty must not touch it.

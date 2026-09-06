@@ -14,6 +14,8 @@ dist/
 build/
 *.joblib
 models/*.joblib
+app/ml/models/*.joblib
+app/ml/models/*.meta.json
 !models/.gitkeep
 data/raw/*
 !data/raw/.gitkeep
@@ -21,3 +23,5 @@ data/processed/*
 !data/processed/.gitkeep
 .DS_Store
 *.log
+.fastf1_cache/
+*.ff1pkl

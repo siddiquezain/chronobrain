@@ -39,6 +39,14 @@ class TelemetryInput(BaseModel):
         ge=0.0,
         description="Gap to car ahead at the detection point (seconds). None if no car ahead.",
     )
+    gap_to_car_behind_s: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description=(
+            "Gap to car behind (seconds). None when rearward telemetry is not modelled. "
+            "Used only as a strategic 'defending' signal downstream — never for legality."
+        ),
+    )
     overtake_qualified_last_lap: bool = Field(
         False,
         description=(
@@ -106,14 +114,18 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "initial_soc_mj": 5.0,
         "rival_initial_soc_mj": 7.5,
         "gap_to_car_ahead_s": 3.0,
+        "gap_to_car_behind_s": 0.5,
         "rival_terminal_speed_kmh": 325.0,
     },
-    # Illegal candidate — deployment already over cap
+    # Illegal candidate — deployment already over the per-lap cap (Art. 5.4.10 model)
     "E": {
         "initial_soc_mj": 4.0,
         "rival_initial_soc_mj": 4.0,
         "gap_to_car_ahead_s": 0.8,
         "rival_terminal_speed_kmh": 318.0,
+        # forces an over-cap lap (above even the +0.5 MJ bonus cap) so the
+        # regulatory gate rejects every one of the five modes
+        "lap_energy_deployed_mj": 9.7,
     },
 }
 
@@ -152,10 +164,19 @@ class TelemetrySimulator:
 
     def next_lap(self) -> tuple[TelemetryInput, RivalObservation]:
         """Advance one lap and return (TelemetryInput, RivalObservation)."""
-        harvested = self._harvest_this_lap()
+        harvested = self._harvest_this_lap()  # draws kept for RNG-stream stability
         deployed = self._deploy_this_lap()
-        self._soc_mj = float(np.clip(self._soc_mj + harvested - deployed, 0.0, 9.0))
+        if "lap_energy_deployed_mj" in self._preset:
+            deployed = float(self._preset["lap_energy_deployed_mj"])
         self._lap_energy_deployed_mj = deployed
+
+        # SoC is mean-reverting toward the scenario's characteristic level rather
+        # than monotonically draining: a scenario-based source should keep each
+        # scenario "in character" for the whole stint, not run every car flat by
+        # mid-race. (harvested/deployed above still feed the Art. 5.4.10 gate field.)
+        target_soc = float(self._preset["initial_soc_mj"])
+        drift = 0.18 * (target_soc - self._soc_mj) + (harvested - deployed) * 0.5
+        self._soc_mj = float(np.clip(self._soc_mj + drift, 0.0, 9.0))
 
         gap_base = self._preset.get("gap_to_car_ahead_s", 2.0)
         gap = float(np.clip(gap_base + self._rng.normal(0, 0.1), 0.1, 5.0))
@@ -169,12 +190,14 @@ class TelemetrySimulator:
         )
         rival_obs = self._build_rival_observation()
 
+        gap_behind = self._preset.get("gap_to_car_behind_s")
         telemetry = TelemetryInput(
             lap_number=self._lap,
             current_soc_mj=round(self._soc_mj, 3),
             lap_start_soc_mj=round(self._lap_start_soc_mj, 3),
             lap_energy_deployed_mj=round(self._lap_energy_deployed_mj, 3),
             gap_to_car_ahead_s=round(gap, 3),
+            gap_to_car_behind_s=(round(float(gap_behind), 3) if gap_behind is not None else None),
             overtake_qualified_last_lap=last_qualified,
             speed_kmh=float(np.clip(280.0 + self._rng.normal(0, 10), 200, 360)),
             total_laps=self.total_laps,
