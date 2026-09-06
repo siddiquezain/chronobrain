@@ -33,6 +33,7 @@ VOCAB: dict[str, str] = {
     "NO_LEGAL_AGGRESSIVE_OPTION": "No aggressive mode is legal on this lap.",
     "OVERTAKE_BONUS_BANKED": "An overtake bonus is banked from the previous lap.",
     "OVERTAKE_BONUS_NOT_AVAILABLE": "No overtake bonus is banked for this lap.",
+    "ARMING_OVERTAKE_BONUS": "Attacking now within proximity and qualifying the overtake bonus for next lap.",
     # confidence
     "STATISTICAL_EVIDENCE_WEAK": "Statistical evidence for the top mode is below threshold.",
     "PRACTICAL_DIFFERENCE_SMALL": "The gap between the top two modes is not practically meaningful.",
@@ -110,10 +111,12 @@ def select(inp: ReasonInputs) -> List[str]:
         if "RIVAL_CONFIDENCE" in inp.override_reason:
             codes.append("RIVAL_ESTIMATE_UNCERTAIN")
         if "DATA_QUALITY" in inp.override_reason:
-            codes.append("OPPORTUNITY_AMBIGUOUS" if inp.opportunity_ambiguous else "DATA_QUALITY_LOW")
+            codes.append("DATA_QUALITY_LOW")
 
     if inp.data_quality_status == "INVALID" and "DATA_QUALITY_LOW" not in codes:
         codes.append("DATA_QUALITY_LOW")
+    if inp.opportunity_ambiguous and "OPPORTUNITY_AMBIGUOUS" not in codes:
+        codes.append("OPPORTUNITY_AMBIGUOUS")  # informational — timing call was close
 
     # --- rival state ---
     if inp.rival_estimate_uncertain and "RIVAL_ESTIMATE_UNCERTAIN" not in codes:
@@ -143,6 +146,8 @@ def select(inp: ReasonInputs) -> List[str]:
         codes.append("CONSERVING_FOR_FUTURE")
     if inp.final_mode == "PUSH_MODE":
         codes.append("DEFENDING_POSITION")
+    if inp.final_mode == "ARM_OVERTAKE_MODE":
+        codes.append("ARMING_OVERTAKE_BONUS")
 
     # --- ML overtake probability (input, not decider) ---
     if inp.ml_overtake_prob is not None and aggressive:

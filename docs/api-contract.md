@@ -80,62 +80,37 @@ GET /api/v1/health   → { status, service, version, fastf1_available }
 }
 ```
 
-Determinism: identical body ⇒ identical response except `meta.generated_at`.
+Determinism: identical body ⇒ identical response except `meta.generated_at`. The
+*decision* is reproducible on any machine; the full JSON is byte-identical only
+when the same ML model artifact is present (it feeds `opportunity.current_window_overtake_prob`
+and `meta.config_fingerprint`). Train it with `python scripts/train_models.py`
+(seeded — everyone gets the same model).
 
-The WebSocket broadcast (`/ws`) additionally carries `decision_snapshot` per tick.
+`POST /api/v1/decision` is the **single authoritative ChronoPace decision source.**
+The frontend consumes this endpoint (or the WebSocket `decision_snapshot`, which
+is the same object) and nothing else for decisions.
 
-## REST Endpoints (existing — unchanged)
-
-### Health
+## Health
 
 ```
 GET /health
 → { "status": "ok", "service": "ChronoPace", "version": "1.0.0" }
 ```
 
-### Race State
+## DEPRECATED — legacy Stack B endpoints (do not use for decisions)
 
-```
-GET /api/race/state
-→ RaceState { timestamp, lap, total_laps, position, gap_to_car_ahead_s,
-              gap_to_car_behind_s, speed_kmh, soc_mj, soc_pct,
-              tyre_compound, tyre_age_laps, sector, drs_available }
+`GET /api/race/state`, `POST /api/race/update`, `GET /api/energy/state`,
+`GET /api/overtake/current`, `GET /api/strategy/recommendation` are served by the
+legacy Stack B engines. Their numbers **do not match** the v1 `DecisionSnapshot`.
+They are flagged `deprecated: true` in the OpenAPI schema and every response
+carries `Deprecation: true` + `Link: </api/v1/decision>; rel="successor-version"`.
+They only return data while a simulation loop is running (else `404`).
 
-POST /api/race/update
-Body: RaceStateUpdate (all fields optional)
-→ RaceState (merged state)
-```
+(Legacy shapes unchanged — `RaceState`, `EnergyState`, `OvertakeAnalysis`,
+`StrategyRecommendation` — see the OpenAPI schema. Not documented further here
+because the frontend must not depend on them.)
 
-### Energy
-
-```
-GET /api/energy/state
-→ EnergyState { soc_mj, soc_pct, remaining_mj, deployed_this_lap_mj,
-                harvested_this_lap_mj, deployment_headroom_mj,
-                projected_reserve_mj, projected_end_of_race_mj,
-                can_afford_aggressive }
-```
-
-### Overtake
-
-```
-GET /api/overtake/current
-→ OvertakeAnalysis { score, probability, gap_s, closing_speed_mps,
-                     slipstream_factor, braking_zone_score, corner_exit_score,
-                     energy_advantage_score, contributing_factors,
-                     closing_speed_score, gap_score }
-```
-
-### Strategy
-
-```
-GET /api/strategy/recommendation
-→ StrategyRecommendation { timestamp, lap, recommended_mode, confidence,
-                            overtake{}, energy{}, risk{}, regulatory{},
-                            decision{}, explanation, utility, reason_codes }
-```
-
-### Simulation
+### Simulation (active)
 
 ```
 POST /api/simulation/start
@@ -157,14 +132,15 @@ ws://localhost:8000/ws
 Client → Server:  "ping"
 Server → Client:  "pong"
 
-Server broadcast (every tick):
+Server broadcast (every simulation tick) — ONLY the authoritative snapshot:
 {
-  "race_state": { ... },
-  "energy":     { ... },
-  "overtake":   { ... },
-  "strategy":   { ... }
+  "type": "decision_snapshot",
+  "tick": <int>,
+  "snapshot": DecisionSnapshot   // identical shape to POST /api/v1/decision
 }
 ```
+
+No legacy race_state / energy / strategy payload is sent on the wire.
 
 ## Deployment Modes
 

@@ -87,16 +87,17 @@ because of our energy state.
 
 ## API
 
-Canonical:
-- `POST /api/v1/decision` — one authoritative `DecisionSnapshot`
+**Authoritative (use only this for decisions):**
+- `POST /api/v1/decision` — one `DecisionSnapshot`
 - `GET  /api/v1/scenario/{A..E}` — convenience GET for the demo scenarios
 - `GET  /api/v1/health` — includes `fastf1_available`
+- `WS /ws` — per simulation tick, broadcasts `{ type, tick, snapshot }` (the same `DecisionSnapshot`, nothing else)
 
-Existing (unchanged):
-- `GET /health`, `GET /api/race/state`, `GET /api/energy/state`,
-  `GET /api/overtake/current`, `GET /api/strategy/recommendation`
-- `POST /api/simulation/start|stop`, `GET /api/simulation/status`
-- `WS /ws` — per-tick broadcast, now also carrying `decision_snapshot`
+**Support:** `GET /health`, `POST /api/simulation/start|stop`, `GET /api/simulation/status`
+
+**Deprecated (Stack B, NOT authoritative):** `/api/race/*`, `/api/energy/*`,
+`/api/overtake/*`, `/api/strategy/*` — flagged `deprecated` in OpenAPI, every
+response carries `Deprecation: true`. The frontend must not read decisions from these.
 
 Swagger UI at `http://localhost:8000/docs`.
 

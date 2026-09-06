@@ -50,7 +50,7 @@ class TelemetryState(BaseModel):
     soc_mj: float = Field(..., ge=0.0, le=9.0, description="Battery SoC (MJ)")
     soc_pct: float = Field(..., ge=0.0, le=100.0, description="Battery SoC as percentage")
     energy_deployment_mj: float = Field(
-        ..., ge=0.0, description="MGU-K energy deployed this lap so far (MJ). Art. 5.4.10."
+        ..., ge=0.0, description="MGU-K energy deployed this lap so far (MJ). Tracked against the per-lap deployment cap."
     )
     energy_harvest_mj: float = Field(
         ..., ge=0.0, description="MGU-K energy harvested this lap so far (MJ)"
@@ -59,7 +59,7 @@ class TelemetryState(BaseModel):
         ..., ge=0.0, description="Usable energy remaining (MJ)"
     )
     energy_budget_mj: float = Field(
-        ..., ge=0.0, description="Remaining deployment budget before Art.5.4.10 cap (MJ)"
+        ..., ge=0.0, description="Remaining deployment budget before the per-lap cap (MJ)"
     )
 
     tyre_age_laps: int = Field(..., ge=0, description="Tyre age in laps")

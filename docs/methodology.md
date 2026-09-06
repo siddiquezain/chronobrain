@@ -38,7 +38,7 @@ Five sequential gates, all must pass for the planner's recommendation to stand:
 2. **Practical significance** — |Δlaptime| > 0.05 s and |ΔP(overtake)| > 3 percentage points
 3. **DCLI** — Driver Cognitive Load Index ≤ 60.0 (guards against issuing recommendations that would overwhelm the driver during a complex situation)
 4. **Rival confidence** — rival SoC standard deviation ≤ 1.5 MJ (don't commit to an energy strategy when rival state is too uncertain)
-5. **Data quality / opportunity clarity** — the Data Quality Gate's `quality_score` ≥ 0.6 **and** the opportunity horizon can actually separate the strategies. Degraded/stale telemetry or an ambiguous opportunity makes the gate abstain.
+5. **Data quality** — the Data Quality Gate's `quality_score` ≥ 0.6. Degraded/stale/corrupt telemetry makes the gate abstain (→ BALANCED_MODE). *(The opportunity-ambiguity signal is now informational only — surfaced in the snapshot as `opportunity.opportunity_uncertain` — because the decision engine's decisive-margin rule already handles a close attack-now-vs-wait call without needing an abstention.)*
 
 Override: if any gate fails, `recommended_mode` → BALANCED_MODE. `override_reason` names **all** failing gates.
 
@@ -109,11 +109,31 @@ A 1,000-particle sequential importance resampling filter with 4 observable signa
 | `corner_exit_accel_g` | Strong exit acceleration → high energy deployment |
 | `sector_delta_s` | Sector time relative to baseline → integrated energy spend |
 
-Predict step: Gaussian drift (σ = 0.3 MJ) simulates lap-to-lap SoC change.
-Update step: 4-signal Gaussian likelihood, systematic resampling.
+Predict step: small near-neutral drift (−0.08 MJ/lap) + process noise (σ = 0.40 MJ).
+Update step: 4-signal Gaussian likelihood with widened noise budgets, systematic
+resampling followed by **roughening** (σ = 0.30 MJ jitter on the resampled
+particles). A **floor of 0.35 MJ** is applied to the reported posterior std.
+
+**Why roughening + a std floor + a near-zero drift?** An earlier version used a
+−0.5 MJ/lap drift and tight observation noise; it collapsed the posterior to a
+near-zero std after a couple of observations and biased every estimate low. The
+changes above stop that. **This is a calibration-free sanity fix, not a validated
+estimator** — the filter has never been checked against real F1 telemetry, and
+the constants are engineering choices. Regression tests
+(`test_rival_estimator.py::TestNotOverconfident`) assert it no longer collapses,
+tracks a genuinely-changing hidden SoC, and stays deterministic.
 
 ## ML — Overtake Success Classifier
 
-RandomForestClassifier (100 trees, seed=42) trained on synthetic data with 8 features. Used to improve overtake probability estimates in the overtake engine.
+RandomForestClassifier (100 trees, `random_state=42`, single-threaded for
+determinism) trained on **synthetic** data over **6 genuinely-computed features**:
+`gap_to_car_ahead_s`, `gap_trend_s_per_lap` (from the event-time window; negative
+= closing), `our_soc_mj`, `our_speed_kmh`, `drs_available`, `rival_terminal_speed_kmh`.
+No hardcoded placeholder inputs. A metadata sidecar records the feature order,
+sklearn version, dataset hash and CV accuracy; a heuristic fallback (same formula
+as the synthetic label) is used if the model file is absent.
 
-**Why synthetic data?** Real Formula 1 overtake outcome data is not publicly available at the resolution required. The synthetic dataset encodes structural domain knowledge (small gap + high closing speed + DRS → higher success probability) while keeping the classifier interface ready for real data when available.
+**Why synthetic data?** Real per-attempt F1 overtake outcome data is not public.
+The label encodes uncontroversial structure (close + closing + energy + DRS +
+slower car ahead → more likely). It is **not calibrated** against real outcomes.
+The model is an *input* to the decision, never the decider.

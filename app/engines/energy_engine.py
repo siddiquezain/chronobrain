@@ -88,7 +88,7 @@ class EnergyEngine:
     def calculate_deployment_headroom(
         self, deployed_this_lap_mj: float, has_bonus: bool = False
     ) -> float:
-        """Remaining deployment budget before Art.5.4.10 cap."""
+        """Remaining deployment budget before the per-lap cap."""
         settings = get_settings()
         cap = settings.max_deployment_per_lap_mj
         if has_bonus:

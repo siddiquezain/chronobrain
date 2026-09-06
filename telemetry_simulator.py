@@ -32,7 +32,7 @@ class TelemetryInput(BaseModel):
     lap_energy_deployed_mj: float = Field(
         ...,
         ge=0.0,
-        description="MGU-K energy deployed so far this lap (MJ). Art. 5.4.10 tracks this.",
+        description="MGU-K energy deployed so far this lap (MJ). Tracked against the per-lap deployment cap.",
     )
     gap_to_car_ahead_s: Optional[float] = Field(
         None,
@@ -117,7 +117,7 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "gap_to_car_behind_s": 0.5,
         "rival_terminal_speed_kmh": 325.0,
     },
-    # Illegal candidate — deployment already over the per-lap cap (Art. 5.4.10 model)
+    # Illegal candidate — deployment already over the modelled per-lap cap
     "E": {
         "initial_soc_mj": 4.0,
         "rival_initial_soc_mj": 4.0,
@@ -173,7 +173,7 @@ class TelemetrySimulator:
         # SoC is mean-reverting toward the scenario's characteristic level rather
         # than monotonically draining: a scenario-based source should keep each
         # scenario "in character" for the whole stint, not run every car flat by
-        # mid-race. (harvested/deployed above still feed the Art. 5.4.10 gate field.)
+        # mid-race. (harvested/deployed above still feed the per-lap-cap gate field.)
         target_soc = float(self._preset["initial_soc_mj"])
         drift = 0.18 * (target_soc - self._soc_mj) + (harvested - deployed) * 0.5
         self._soc_mj = float(np.clip(self._soc_mj + drift, 0.0, 9.0))
@@ -185,9 +185,17 @@ class TelemetrySimulator:
         last_qualified = self._overtake_qualified_last_lap
         self._overtake_qualified_last_lap = qualified
 
-        self._rival_soc_mj = float(
-            np.clip(self._rival_soc_mj + self._rng.normal(-0.5, 0.3), 0.0, 9.0)
-        )
+        # Rival SoC mean-reverts toward its scenario level (like our own car) rather
+        # than draining monotonically to zero by mid-race — a scenario-based source
+        # should keep the rival's hidden state in a meaningful band all stint, so
+        # the rival estimator has something real to track.
+        rival_target = float(self._preset["rival_initial_soc_mj"])
+        self._rival_soc_mj = float(np.clip(
+            self._rival_soc_mj
+            + 0.15 * (rival_target - self._rival_soc_mj)
+            + self._rng.normal(-0.05, 0.28),
+            0.0, 9.0,
+        ))
         rival_obs = self._build_rival_observation()
 
         gap_behind = self._preset.get("gap_to_car_behind_s")

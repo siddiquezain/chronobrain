@@ -257,7 +257,7 @@ def _extract_features(ctx: DecisionContext) -> None:
         reserve_low=bool(reserve_low),
         energy_is_modeled=nl.energy_is_modeled,
     )
-    ctx.ml_overtake_prob = _ml_overtake_probability(nl, soc)
+    ctx.ml_overtake_prob = _ml_overtake_probability(nl, soc, ctx.window)
 
 
 def _run_gate(ctx: DecisionContext) -> None:
@@ -352,18 +352,25 @@ def _window_strength(ctx: DecisionContext) -> dict:
 
 
 def _opportunity_uncertain(ctx: DecisionContext) -> bool:
-    """The horizon can't tell the strategies apart -> the opportunity is ambiguous."""
+    """
+    INFORMATIONAL only (surfaced in the snapshot, NOT a confidence-gate input).
+
+    Fires when the horizon's top strategy is a WAIT that beats ATTACK_NOW by less
+    than the decisive margin AND that lead is within the sample noise — i.e. the
+    horizon leans toward waiting but not convincingly. The decision engine already
+    handles this correctly (it does not defer below the decisive margin), so this
+    flag does not force an abstention; it is here so the frontend / trace can show
+    "the timing call was close".
+    """
     h = ctx.horizon_result
-    if h is None or len(h.ranked_strategies) < 2:
+    if h is None or not h.future_energy_value_active or len(h.ranked_strategies) < 3:
         return False
-    if h.future_energy_value_active:
-        best, second = h.ranked_strategies[0], h.ranked_strategies[1]
-        spread = abs(best.strategic_value - second.strategic_value)
-    else:
-        best, second = h.ranked_strategies[0], h.ranked_strategies[1]
-        spread = abs(best.mean_horizon_delta_s - second.mean_horizon_delta_s)
-    top_std = h.ranked_strategies[0].std_horizon_delta_s
-    return spread < 0.02 and top_std > 1.0
+    top = h.ranked_strategies[0]
+    attack = next((s for s in h.ranked_strategies if s.strategy_name == "ATTACK_NOW"), None)
+    if attack is None or not top.strategy_name.startswith("WAIT"):
+        return False
+    lead = top.strategic_value - attack.strategic_value
+    return 0.0 < lead < ctx.config.horizon_decisive_margin_s and top.std_horizon_delta_s > 1.0
 
 
 def _run_confidence(ctx: DecisionContext) -> None:
@@ -380,7 +387,9 @@ def _run_confidence(ctx: DecisionContext) -> None:
         rival_estimate=ctx.rival.estimate if ctx.rival else None,
         planner=getattr(ctx, "_planner", None),
         data_quality_score=dq,
-        opportunity_uncertain=ctx.opportunity_uncertain,
+        # opportunity_uncertain is informational only (see _opportunity_uncertain) —
+        # the decision engine's decisive-margin rule already handles a close call.
+        opportunity_uncertain=False,
     )
 
 
@@ -415,28 +424,40 @@ def _fuse(ctx: DecisionContext) -> None:
     prefers_wait, wait_n = _horizon_prefers_wait(ctx, margin_mult=3.0 if window_is_prime else 1.0)
     ctx.prefers_wait, ctx.wait_n = prefers_wait, wait_n
 
+    gap_ahead = ctx.target_lap.gap_to_car_ahead_s
+    in_proximity = (
+        gap_ahead is not None
+        and gap_ahead <= cfg.gate_config().overtake_detection_gap_threshold_s
+    )
+    arm_legal = DeploymentMode.ARM_OVERTAKE_MODE in legal
+    use_bonus_legal = DeploymentMode.USE_OVERTAKE_BONUS_MODE in legal
+
     def _hold_mode() -> DeploymentMode:
         if reserve_low and DeploymentMode.CONSERVE_MODE in legal:
             return DeploymentMode.CONSERVE_MODE
         return DeploymentMode.BALANCED_MODE
 
+    def _attack_mode() -> DeploymentMode:
+        """
+        'Attack now' resolves to a specific mode:
+          - spend a banked bonus if we have one            -> USE_OVERTAKE_BONUS_MODE
+          - in proximity, no bonus banked yet              -> ARM_OVERTAKE_MODE
+            (attack this lap AND qualify next lap's bonus — the actual meaning of ARM)
+          - otherwise fall back to the planner's aggressive pick (e.g. PUSH)
+        """
+        if use_bonus_legal and ctx.overtake_bonus_banked:
+            return DeploymentMode.USE_OVERTAKE_BONUS_MODE
+        if arm_legal and in_proximity and not ctx.overtake_bonus_banked:
+            return DeploymentMode.ARM_OVERTAKE_MODE
+        return cg_mode if cg_mode in legal else DeploymentMode.BALANCED_MODE
+
     if all_illegal:
         final_mode, action = DeploymentMode.BALANCED_MODE, "HOLD"
     elif cgr.overridden:
         final_mode, action = DeploymentMode.BALANCED_MODE, "HOLD"
-    elif cg_mode == DeploymentMode.PUSH_MODE:
-        # PUSH spends extra energy for pace. Worth it only to defend a real threat
-        # behind and only if affordable — never as an always-on "free pace" button.
-        if defending and can_afford:
-            final_mode, action = DeploymentMode.PUSH_MODE, "PUSH"
-        elif not can_afford:
-            final_mode = _hold_mode()
-            action = "CONSERVE" if final_mode == DeploymentMode.CONSERVE_MODE else "HOLD"
-        else:
-            final_mode, action = DeploymentMode.BALANCED_MODE, "HOLD"
     elif cg_aggressive and prefers_wait and f"WAIT_{wait_n}_LAPS" in ctx.feasible_actions:
-        # the horizon values a future window more than attacking now, AND that wait
-        # is feasible (energy recovers during it) -> defer, deploy conservatively now
+        # horizon values a future window more than attacking now, AND that wait is
+        # feasible (energy recovers during it) -> defer, deploy conservatively now
         final_mode = _hold_mode()
         action = f"WAIT_{wait_n}_LAPS"
     elif cg_aggressive and not can_afford:
@@ -448,7 +469,16 @@ def _fuse(ctx: DecisionContext) -> None:
         final_mode = _hold_mode()
         action = "CONSERVE" if final_mode == DeploymentMode.CONSERVE_MODE else "HOLD"
     elif cg_aggressive:
-        final_mode, action = cg_mode, "ATTACK_NOW"
+        attack_mode = _attack_mode()
+        if attack_mode == DeploymentMode.PUSH_MODE:
+            # PUSH spends extra energy for pace with no bonus-qualification benefit.
+            # Worth it only to defend a real threat behind; otherwise just hold.
+            if defending:
+                final_mode, action = DeploymentMode.PUSH_MODE, "PUSH"
+            else:
+                final_mode, action = DeploymentMode.BALANCED_MODE, "HOLD"
+        else:
+            final_mode, action = attack_mode, "ATTACK_NOW"  # ARM or USE_OVERTAKE_BONUS
     else:
         final_mode = cg_mode
         action = "CONSERVE" if cg_mode == DeploymentMode.CONSERVE_MODE else "HOLD"
@@ -763,35 +793,30 @@ def _deployment_headroom(deployed: float, has_bonus: bool, cfg: DecisionConfig) 
     return float(np.clip(cap - deployed, 0.0, cap))
 
 
-def _ml_overtake_probability(nl: NormalizedLap, soc_mj: float) -> Optional[float]:
+def _ml_overtake_probability(
+    nl: NormalizedLap, soc_mj: float, window
+) -> Optional[float]:
     """
     P(overtake success) from the RandomForest classifier (heuristic fallback if
-    the model file is absent). Both paths are deterministic. This is an INPUT to
-    the decision, never the decider.
+    the model file is absent). Every feature is genuinely computed from the
+    normalized lap + the event-time window — no hardcoded placeholders. Both code
+    paths are deterministic. This is an INPUT to the decision, never the decider.
     """
     try:
+        from app.ml.features import build_features
         from app.ml.predict import predict_probability
 
-        feats = np.array([[
-            nl.gap_to_car_ahead_s if nl.gap_to_car_ahead_s is not None else 3.0,
-            _closing_speed_proxy(nl),
-            0.5,                                   # slipstream — not in NormalizedLap; neutral
-            soc_mj,
-            15.0,                                  # tyre age — unavailable; neutral
-            700.0,                                 # straight length — unavailable; neutral
-            nl.our_speed_kmh,
-            1.0 if nl.drs_available else 0.0,
-        ]], dtype=np.float64)
+        feats = build_features(
+            gap_to_car_ahead_s=nl.gap_to_car_ahead_s,
+            gap_trend_s_per_lap=(window.gap_ahead_trend_s_per_lap if window is not None else None),
+            our_soc_mj=soc_mj,
+            our_speed_kmh=nl.our_speed_kmh,
+            drs_available=nl.drs_available,
+            rival_terminal_speed_kmh=nl.rival_terminal_speed_kmh,
+        )
         return round(float(predict_probability(feats)), 4)
     except Exception:
         return None
-
-
-def _closing_speed_proxy(nl: NormalizedLap) -> float:
-    """No per-sample closing speed in a NormalizedLap; proxy from gap (smaller gap -> closing)."""
-    if nl.gap_to_car_ahead_s is None:
-        return 0.0
-    return float(np.clip((1.5 - nl.gap_to_car_ahead_s) * 6.0, 0.0, 15.0))
 
 
 def _norm_cdf(z: float) -> float:

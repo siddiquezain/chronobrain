@@ -12,9 +12,18 @@ regulations.
 | `MODEL_ASSUMPTION` | A ChronoPace modelling choice. May be grounded in public figures, but is not a hard rule *as applied here*. |
 | `DEMO_CONSTANT` | Chosen only to make a demo scenario behave (none are load-bearing in the engine). |
 
-The values live in `rule_gate.GateConfig`. The catalogue that classifies them is
+The values live in **one place — `rule_gate.GateConfig`.** The v1 decision
+pipeline reads them from there. The (deprecated) Stack B `Settings` object now
+*defaults* its regulatory fields from `GateConfig()` rather than re-declaring the
+numbers, so the two stacks can no longer silently diverge (an env var still
+overrides for local experiments). The catalogue that classifies each constant is
 `app/regulation/constants.py`, and `test_regulation_provenance.py` fails the build
-if the two drift apart or if an assumption is silently promoted to `VERIFIED_FIA`.
+if the catalogue drifts from `GateConfig` or an assumption is promoted to
+`VERIFIED_FIA` without a source.
+
+Inline code comments no longer cite specific FIA article numbers for the
+`MODEL_ASSUMPTION` constants (they previously said "Art. 5.4.10 / 5.4.9"); the
+comments now match the provenance catalogue.
 
 ## Constants
 

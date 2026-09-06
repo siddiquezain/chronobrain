@@ -41,17 +41,29 @@ class RivalEstimatorConfig:
         default_factory=lambda: _DEFAULT_GATE_CONFIG.max_deployment_per_lap_mj
     )
 
-    # Particle filter dynamics
-    process_noise_std_mj: float = 0.3
-    expected_soc_drift_per_lap_mj: float = -0.5
+    # Particle filter dynamics.
+    # `expected_soc_drift_per_lap_mj` is deliberately near-zero: without jointly
+    # inferring the rival's own mode choice (out of scope, see context.md), a large
+    # systematic drift biases the posterior low every lap. A small negative value
+    # reflects a slight net spend without pretending we know their strategy.
+    process_noise_std_mj: float = 0.40
+    expected_soc_drift_per_lap_mj: float = -0.08
 
-    # Observation noise std per signal
-    observation_noise_std_speed_kmh: float = 5.0
-    observation_noise_std_clip_fraction: float = 0.08
-    observation_noise_std_accel_g: float = 0.15
-    observation_noise_std_sector_delta_s: float = 0.12
+    # Observation noise std per signal — widened so a single noisy observation
+    # cannot collapse the posterior. These are uncertainty budgets, not measured
+    # sensor errors.
+    observation_noise_std_speed_kmh: float = 9.0
+    observation_noise_std_clip_fraction: float = 0.14
+    observation_noise_std_accel_g: float = 0.25
+    observation_noise_std_sector_delta_s: float = 0.20
 
     ess_resample_threshold_fraction: float = 0.5
+
+    # Roughening (Gordon et al. 1993): jitter added to particles after resampling
+    # to combat sample impoverishment. Without it the SIR filter reports far more
+    # confidence than the evidence supports. Also acts as a floor on posterior std.
+    roughening_std_mj: float = 0.30
+    min_reported_std_mj: float = 0.35
 
     # Illustrative observation-model constants (not measured from real car data)
     baseline_accel_g: float = 1.0
@@ -172,6 +184,13 @@ class RivalStateEstimator:
         if ess < cfg.ess_resample_threshold_fraction * cfg.n_particles:
             indices = self._systematic_resample()
             self._particles = self._particles[indices]
+            # Roughening: jitter the resampled particles so identical copies spread
+            # back out. Combats sample impoverishment / posterior over-confidence.
+            self._particles = np.clip(
+                self._particles + self._rng.normal(0.0, cfg.roughening_std_mj, cfg.n_particles),
+                cfg.soc_min_mj,
+                cfg.soc_max_mj,
+            )
             self._weights = np.ones(cfg.n_particles) / cfg.n_particles
 
     def _systematic_resample(self) -> np.ndarray:
@@ -183,9 +202,13 @@ class RivalStateEstimator:
 
     def estimate(self) -> RivalSocEstimate:
         """Return the current posterior estimate as weighted mean ± std."""
+        cfg = self.config
         mean = float(np.sum(self._weights * self._particles))
         variance = float(np.sum(self._weights * (self._particles - mean) ** 2))
         std = float(np.sqrt(max(variance, 0.0)))
+        # Floor on reported uncertainty: this is a coarse model of a hidden state,
+        # not a measurement. Never claim tighter than this.
+        std = max(std, cfg.min_reported_std_mj)
         return RivalSocEstimate(
             mean_soc_mj=round(mean, 4),
             std_soc_mj=round(std, 4),

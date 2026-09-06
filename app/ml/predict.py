@@ -2,7 +2,7 @@
 Load the trained overtake-success model and expose a deterministic predict.
 
 Reproducibility contract:
-- feature ORDER is fixed by `app.ml.features.FEATURE_NAMES` (8 features)
+- feature ORDER is fixed by `app.ml.features.FEATURE_NAMES` (6 genuinely-computed features)
 - the model is trained with a fixed `random_state` (see train.py) and RandomForest
   inference is deterministic
 - a sidecar `overtake_rf.meta.json` records feature names + sklearn version + a
@@ -64,13 +64,13 @@ def predict_probability(features: np.ndarray) -> float:
     if clf is not None:
         return float(clf.predict_proba(features)[0, 1])
 
-    # Heuristic fallback — matches the dataset label formula in dataset.py
-    gap, closing, slipstream, soc, _, _, _, drs = features[0]
+    # Heuristic fallback — mirrors the dataset label formula in dataset.py
+    gap, gap_trend, soc, _speed, drs, rival_speed = features[0]
     score = (
-        max(0.0, 1.0 - gap / 3.0) * 0.3
-        + max(0.0, min(1.0, closing / 15.0)) * 0.25
-        + slipstream * 0.15
+        max(0.0, 1.0 - gap / 3.0) * 0.30
+        + max(0.0, min(1.0, -gap_trend / 0.6)) * 0.25
         + (soc / 9.0) * 0.15
         + drs * 0.15
+        + max(0.0, min(1.0, (325.0 - rival_speed) / 35.0)) * 0.15
     )
     return float(np.clip(score, 0.0, 1.0))

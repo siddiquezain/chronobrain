@@ -50,7 +50,8 @@ FastF1 historical replay      Synthetic simulator
         │  candidate actions -> feasible set        │  before the planner runs
         │  Stage 2  MonteCarloPlanner (planner)     │  ranks legal modes
         │           OpportunityEngine + FEV         │  ATTACK_NOW/WAIT_N/HOLD, energy carried fwd
-        │  Stage 3  ConfidenceGate (5 gates)        │  may override → BALANCED
+        │  Stage 3  ConfidenceGate (5 gates: stat/  │  may override → BALANCED
+        │           practical/DCLI/rival/data-qual) │
         │  DECISION ENGINE (fusion)                 │  pick from the feasible set
         └──────────────────────┬───────────────────┘
                    ▼
@@ -83,13 +84,17 @@ New in `app/`:
 | `app/decision/` | `run_decision()` orchestrator, `DecisionConfig`, `DecisionContext`, **`window.py`** (event-time trends), **`actions.py`** (candidate/feasible set), unified `reason_codes`, `DecisionSnapshot`, `DecisionTrace`, the fusion step, **`outcome_log.py`** (opt-in prediction→outcome log). |
 | `app/narrative/` | Stage 4 — `narrate(snapshot)`; the only place a language model runs. |
 | `app/regulation/` | Provenance catalogue for every `GateConfig` constant (see `docs/regulation.md`). |
-| `app/engines/` | Legacy Stack B engines (energy/overtake/ML feature extractors + legacy `StrategyEngine`). `EnergyEngine`/`OvertakeEngine`/ML feed the new pipeline; `StrategyEngine`/`RiskEngine`/`AppRegulatoryGate` remain only behind the pre-existing GET endpoints. |
+| `app/engines/` | Legacy Stack B engines, all **deprecated**. Only serve the deprecated GET endpoints during a simulation; the v1 pipeline does not import them. |
 
-## Five deployment modes (fixed)
+## Five deployment modes (fixed, all reachable)
 
 `CONSERVE_MODE`, `BALANCED_MODE`, `ARM_OVERTAKE_MODE`, `USE_OVERTAKE_BONUS_MODE`,
-`PUSH_MODE`. `ARM` = qualify/prepare the Overtake-Mode bonus for next lap;
-`USE_OVERTAKE_BONUS` = spend a bonus banked last lap. They are **not** merged.
+`PUSH_MODE`. `ARM` = attack this lap within proximity, which also qualifies next
+lap's Overtake-Mode bonus; `USE_OVERTAKE_BONUS` = spend a bonus banked last lap.
+They are **not** merged. The decision engine resolves "attack now" to `USE_BONUS`
+when a bonus is banked, to `ARM` when in proximity with none banked, and only to
+`PUSH` when there is a car to defend from behind. All five appear as final
+decisions across the test suite (`test_arm_mode.py::test_all_five_modes_are_reachable`).
 
 The decision engine also emits a user-facing `action`:
 `ATTACK_NOW | WAIT_2_LAPS | WAIT_5_LAPS | HOLD | PUSH | CONSERVE`.
