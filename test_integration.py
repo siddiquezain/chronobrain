@@ -69,7 +69,11 @@ class TestScenarioB:
         telemetry = self._get_scenario_b_telemetry()
         gate = gate_from_telemetry(telemetry)
         planner = MonteCarloPlanner(seed=42)
-        result = planner.plan(gate)
+        # the planner now needs the live race state (a car in range) to rank an
+        # attack mode first — a static prior alone must not do it.
+        result = planner.plan(
+            gate, PlanningContext(gap_to_car_ahead_s=telemetry.gap_to_car_ahead_s)
+        )
 
         # USE_OVERTAKE_BONUS or ARM should be top pick (both have negative mean delta)
         assert result.recommended_mode in (

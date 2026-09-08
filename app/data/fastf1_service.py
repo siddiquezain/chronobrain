@@ -157,6 +157,15 @@ def load_replay(
         )
     gap = _gap_to_rival_s(ses, our_driver, rival_driver)
 
+    # per-lap running position and lap-fitness status (pit / out / invalid), and a
+    # cumulative-lap-time fallback for who-leads when Position is missing.
+    our_status = _lap_status_by_lap(ses, our_driver)
+    rival_status = _lap_status_by_lap(ses, rival_driver)
+    our_pos = _positions_by_lap(ses, our_driver)
+    rival_pos = _positions_by_lap(ses, rival_driver)
+    our_cum = _cumulative_laptime(ses, our_driver)
+    rival_cum = _cumulative_laptime(ses, rival_driver)
+
     lap_numbers = sorted(set(our_samples) & set(rival_samples))
     if laps is not None:
         wanted = set(laps)
@@ -175,16 +184,41 @@ def load_replay(
         pass
     src = label or f"{year} {ev_name} {session}, {our_driver} vs {rival_driver}"
 
-    # rolling (causal) baselines
-    rival_lap_times = _rival_lap_time_baseline(rival_samples)
-    our_thr = {ln: _mean_channel(s, "throttle") for ln, s in our_samples.items()}
-    our_brk = {ln: _mean_channel(s, "brake") for ln, s in our_samples.items()}
+    # rolling (causal) baselines — built from RACING laps only so a pit lap never
+    # poisons the baseline that later laps are measured against.
+    rival_lap_times = _rival_lap_time_baseline(rival_samples, rival_status)
+    our_thr = {
+        ln: _mean_channel(s, "throttle")
+        for ln, s in our_samples.items()
+        if our_status.get(ln, "racing") == "racing"
+    }
+    our_brk = {
+        ln: _mean_channel(s, "brake")
+        for ln, s in our_samples.items()
+        if our_status.get(ln, "racing") == "racing"
+    }
     thr_base = _rolling_mean(our_thr)
     brk_base = _rolling_mean(our_brk)
+    all_thr = {ln: _mean_channel(s, "throttle") for ln, s in our_samples.items()}
+    all_brk = {ln: _mean_channel(s, "brake") for ln, s in our_samples.items()}
 
     out: List[NormalizedLap] = []
     prev_soc: Optional[float] = None
     for ln in lap_numbers:
+        o_status = our_status.get(ln, "racing")
+        r_status = rival_status.get(ln, "racing")
+
+        # who is ahead on track? Position when both are known, else the sign of the
+        # cumulative lap-time difference (both causal — through lap N only).
+        we_lead = _we_lead(
+            our_pos.get(ln), rival_pos.get(ln), our_cum.get(ln), rival_cum.get(ln)
+        )
+
+        # a pit cycle on EITHER car makes the relative gap meaningless — do not let
+        # it become an overtake window or a defensive signal.
+        g = gap.get(ln)
+        gap_usable = g if (o_status == "racing" and r_status == "racing") else None
+
         nl = condense_lap(
             our_samples[ln],
             rival_samples.get(ln, []),
@@ -192,11 +226,14 @@ def load_replay(
             total_laps=total_laps,
             data_mode="REPLAY",
             prev_soc_mj=prev_soc,
-            gap_to_car_ahead_s=gap.get(ln),
+            gap_to_car_ahead_s=(None if we_lead else gap_usable),
+            gap_to_car_behind_s=(gap_usable if we_lead else None),
             energy_model=model,
             rival_sector_baseline_s=rival_lap_times.get(ln),
-            throttle_baseline=thr_base.get(ln, our_thr.get(ln)),
-            brake_baseline=brk_base.get(ln, our_brk.get(ln)),
+            throttle_baseline=thr_base.get(ln, all_thr.get(ln)),
+            brake_baseline=brk_base.get(ln, all_brk.get(ln)),
+            lap_status=o_status,
+            rival_lap_status=r_status,
             source_detail=src,
         )
         prev_soc = nl.our_soc_mj
@@ -262,9 +299,19 @@ def _gap_to_rival_s(session, our_driver: str, rival_driver: str) -> Dict[int, fl
     return {ln: round(abs(ours[ln] - theirs[ln]), 3) for ln in set(ours) & set(theirs)}
 
 
-def _rival_lap_time_baseline(rival_samples: Dict[int, List[TelemetrySample]]) -> Dict[int, float]:
-    """Rolling mean of the rival's implied lap time (last-sample timestamp) up to each lap."""
-    times = {ln: s[-1].timestamp_s for ln, s in rival_samples.items() if s}
+def _rival_lap_time_baseline(
+    rival_samples: Dict[int, List[TelemetrySample]],
+    rival_status: Optional[Dict[int, str]] = None,
+) -> Dict[int, float]:
+    """Rolling mean of the rival's implied lap time (last-sample timestamp) up to
+    each lap, over RACING laps only (a pit lap would otherwise skew the baseline
+    every subsequent lap)."""
+    status = rival_status or {}
+    times = {
+        ln: s[-1].timestamp_s
+        for ln, s in rival_samples.items()
+        if s and status.get(ln, "racing") == "racing"
+    }
     baseline: Dict[int, float] = {}
     seen: List[float] = []
     for ln in sorted(times):
@@ -272,6 +319,73 @@ def _rival_lap_time_baseline(rival_samples: Dict[int, List[TelemetrySample]]) ->
             baseline[ln] = sum(seen) / len(seen)
         seen.append(times[ln])
     return baseline
+
+
+def _lap_status_by_lap(session, driver: str) -> Dict[int, str]:
+    """
+    Per-lap fitness as clean racing evidence, from data known at that lap's end:
+      * `PitInTime` present   -> 'pit'      (in-lap)
+      * `PitOutTime` present  -> 'out_lap'
+      * FastF1 `IsAccurate` False (standing start, lap deleted, timing glitch)
+                              -> 'invalid_for_energy_inference'
+      * otherwise             -> 'racing'
+    Causal: every column here is a property of that lap, not a future one.
+    """
+    laps = session.laps.pick_drivers(driver) if hasattr(session.laps, "pick_drivers") else session.laps.pick_driver(driver)
+    out: Dict[int, str] = {}
+    for _, lap in laps.iterlaps():
+        ln = int(lap["LapNumber"])
+        pit_in = lap.get("PitInTime")
+        pit_out = lap.get("PitOutTime")
+        if pit_in is not None and not _is_nan(pit_in):
+            out[ln] = "pit"
+        elif pit_out is not None and not _is_nan(pit_out):
+            out[ln] = "out_lap"
+        elif not bool(lap.get("IsAccurate", True)):
+            out[ln] = "invalid_for_energy_inference"
+        else:
+            out[ln] = "racing"
+    return out
+
+
+def _positions_by_lap(session, driver: str) -> Dict[int, Optional[int]]:
+    laps = session.laps.pick_drivers(driver) if hasattr(session.laps, "pick_drivers") else session.laps.pick_driver(driver)
+    out: Dict[int, Optional[int]] = {}
+    for _, lap in laps.iterlaps():
+        ln = int(lap["LapNumber"])
+        pos = lap.get("Position")
+        out[ln] = int(pos) if pos is not None and not _is_nan(pos) else None
+    return out
+
+
+def _we_lead(
+    our_pos: Optional[int],
+    rival_pos: Optional[int],
+    our_cum: Optional[float],
+    rival_cum: Optional[float],
+) -> bool:
+    """Is our driver ahead of the rival on this lap? Running position when both are
+    known (lower number = ahead), else the cumulative-lap-time sign (less elapsed
+    time = ahead). Both signals are causal (through lap N only)."""
+    if our_pos is not None and rival_pos is not None:
+        return our_pos < rival_pos
+    return our_cum is not None and rival_cum is not None and our_cum < rival_cum
+
+
+def _cumulative_laptime(session, driver: str) -> Dict[int, float]:
+    """Cumulative sum of completed lap times through each lap — the fallback signal
+    for who-leads when running Position is missing."""
+    d = session.laps.pick_drivers(driver) if hasattr(session.laps, "pick_drivers") else session.laps.pick_driver(driver)
+    total = 0.0
+    acc: Dict[int, float] = {}
+    for _, lap in d.iterlaps():
+        lt = lap["LapTime"]
+        secs = _to_seconds(lt) if lt is not None and not _is_nan(lt) else None
+        if secs is None:
+            continue
+        total += secs
+        acc[int(lap["LapNumber"])] = total
+    return acc
 
 
 # ---------------------------------------------------------------------------

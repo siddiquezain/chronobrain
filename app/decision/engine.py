@@ -199,6 +199,11 @@ def _thread_state(ctx: DecisionContext) -> None:
         if obs is not None:
             estimator.predict()
             estimator.update(obs)
+        elif estimator.observation_count > 0:
+            # rival lap was pit / out / invalid — a lap passed but there is no
+            # clean observation. Advance the drift (uncertainty grows) but do NOT
+            # update: a +20 s pit-lap delta must never collapse the posterior.
+            estimator.predict()
 
         if i == len(ctx.lap_history) - 1:
             ctx.overtake_bonus_banked = banked
@@ -304,8 +309,12 @@ def _run_planner(ctx: DecisionContext) -> None:
     planner = MonteCarloPlanner(config=cfg.planner_config(), seed=cfg.seed)
     pc = PlanningContext(
         gap_to_car_ahead_s=ctx.target_lap.gap_to_car_ahead_s,
+        gap_to_car_behind_s=ctx.target_lap.gap_to_car_behind_s,
         rival_soc_estimate=ctx.rival.estimate if ctx.rival else None,
         p_defend=ctx.rival.p_defend if ctx.rival else None,
+        own_soc_mj=ctx.energy.soc_mj if ctx.energy else None,
+        low_reserve_mj=cfg.low_reserve_mj,
+        opportunity_strength=ctx.ml_overtake_prob,
     )
     ctx.planner_result = planner.plan(ctx.gate_result, pc)
     ctx._planner = planner  # kept for the confidence gate (raw samples)

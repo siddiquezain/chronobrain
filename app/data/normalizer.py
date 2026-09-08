@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from app.data.samples import DataMode, NormalizedLap, TelemetrySample
+from app.data.samples import DataMode, LapStatus, NormalizedLap, TelemetrySample
 
 # Stack A contracts
 from rule_gate import GateConfig
@@ -27,6 +27,13 @@ from telemetry_simulator import RivalObservation, TelemetryInput
 
 _GATE = GateConfig()
 _SOC_CEIL_MJ = _GATE.max_deployment_per_lap_mj  # 9.0 — Stack A clamps SoC to this
+
+# A rival lap whose implied lap time is this far off its own rolling baseline is a
+# pit lap / safety-car lap / grossly compromised lap — not racing evidence. This
+# is the backstop that keeps a +15/+20 s pit-lap sector delta from ever being read
+# as "rival battery is empty" even if an upstream pit flag were missing.
+# MODEL_ASSUMPTION — an engineered cutoff, not a measured quantity.
+_RIVAL_RACING_MAX_ABS_SECTOR_DELTA_S = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +117,8 @@ def condense_lap(
     rival_sector_baseline_s: Optional[float] = None,
     throttle_baseline: Optional[float] = None,
     brake_baseline: Optional[float] = None,
+    lap_status: LapStatus = "racing",
+    rival_lap_status: LapStatus = "racing",
     source_detail: str = "",
 ) -> NormalizedLap:
     """
@@ -131,7 +140,11 @@ def condense_lap(
     lap_start_soc = model.start_soc_mj if prev_soc_mj is None else prev_soc_mj
     deployed = model.lap_deploy_mj(mean_throttle)
     harvested = model.lap_harvest_mj(mean_brake)
-    if throttle_baseline is not None and brake_baseline is not None:
+    if lap_status != "racing":
+        # A pit in/out lap's throttle/brake trace (pit-lane limiter, box stop) is
+        # not representative work — do not model an energy swing through it.
+        end_soc = round(lap_start_soc, 4)
+    elif throttle_baseline is not None and brake_baseline is not None:
         end_soc = round(model.next_soc(
             lap_start_soc, mean_throttle, mean_brake, throttle_baseline, brake_baseline
         ), 4)
@@ -144,6 +157,26 @@ def condense_lap(
     sector = next((s.sector for s in reversed(our_samples) if s.sector is not None), None)
 
     rival_fields = _rival_observables(rival_samples, rival_sector_baseline_s)
+
+    # Backstop: a rival lap whose implied time is grossly off its own baseline is
+    # not racing evidence, regardless of any upstream pit flag.
+    if (
+        rival_lap_status == "racing"
+        and rival_fields["rival_sector_delta_s"] is not None
+        and abs(rival_fields["rival_sector_delta_s"]) > _RIVAL_RACING_MAX_ABS_SECTOR_DELTA_S
+    ):
+        rival_lap_status = "invalid_for_energy_inference"
+
+    # When the rival lap is not clean racing, drop the four derived observables so
+    # the particle filter simply gets no observation that lap (it predicts, it does
+    # not update — no collapse) and the event-time window skips the point.
+    if rival_lap_status != "racing":
+        rival_fields = dict(
+            rival_terminal_speed_kmh=None,
+            rival_clipping_point_fraction=None,
+            rival_corner_exit_accel_g=None,
+            rival_sector_delta_s=None,
+        )
 
     return NormalizedLap(
         lap=lap,
@@ -158,6 +191,8 @@ def condense_lap(
         position=position,
         sector=sector,
         drs_available=drs_open,
+        lap_status=lap_status,
+        rival_lap_status=rival_lap_status,
         energy_is_modeled=True,
         raw_sample_count=len(our_samples),
         source_detail=source_detail,

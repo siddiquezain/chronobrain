@@ -239,7 +239,11 @@ def test_fastf1_loads_2024_italian_gp_lec_vs_pia(real_monza_loaded):
     assert 45 <= len(laps) <= 53
     assert laps[0].total_laps == 53
     assert all(nl.energy_is_modeled for nl in laps)          # SoC is modelled, not measured
-    assert all(nl.rival_terminal_speed_kmh and nl.rival_terminal_speed_kmh > 250 for nl in laps)
+    # racing laps carry a rival observation; pit / out / invalid laps deliberately do not
+    racing = [nl for nl in laps if nl.rival_lap_status == "racing"]
+    assert len(racing) >= 40
+    assert all(nl.rival_terminal_speed_kmh and nl.rival_terminal_speed_kmh > 250 for nl in racing)
+    assert all(nl.rival_terminal_speed_kmh is None for nl in laps if nl.rival_lap_status != "racing")
     assert "LEC vs PIA" in laps[0].source_detail
 
 

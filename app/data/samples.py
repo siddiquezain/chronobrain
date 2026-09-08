@@ -22,6 +22,13 @@ from pydantic import BaseModel, Field
 
 DataMode = Literal["SYNTHETIC", "REPLAY", "LIVE"]
 
+# A lap's fitness as *clean racing evidence*. Pit in-laps, out-laps and
+# otherwise-flagged laps (FastF1 `IsAccurate == False`, or a lap time far off the
+# rolling baseline) are real telemetry but NOT representative racing performance:
+# they must not feed the rival-energy particle filter, must not create an overtake
+# window, and must not pass the Data Quality Gate as perfect evidence.
+LapStatus = Literal["racing", "pit", "out_lap", "invalid_for_energy_inference"]
+
 
 class TelemetrySample(BaseModel):
     """
@@ -80,8 +87,14 @@ class NormalizedLap(BaseModel):
     position: Optional[int] = Field(None, ge=1)
     sector: Optional[int] = Field(None, ge=1, le=3)
     drs_available: Optional[bool] = None
+    lap_status: LapStatus = Field(
+        "racing", description="Our car's lap: 'racing' or a pit/out/invalid lap that is not clean evidence"
+    )
 
     # --- rival kinematic observables (feed rival_estimator particle filter) ---
+    rival_lap_status: LapStatus = Field(
+        "racing", description="Rival's lap: when not 'racing' the four observables below are None"
+    )
     rival_terminal_speed_kmh: Optional[float] = Field(None, ge=0.0)
     rival_clipping_point_fraction: Optional[float] = Field(None, ge=0.0, le=1.0)
     rival_corner_exit_accel_g: Optional[float] = Field(None, ge=0.0)

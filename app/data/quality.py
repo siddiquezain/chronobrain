@@ -90,6 +90,18 @@ def assess_quality(
         checks.append(f"only {target_lap.raw_sample_count} sub-lap samples backed this lap")
         score -= 0.15
 
+    # --- pit / out / invalid lap: real telemetry, but not clean racing evidence ---
+    if getattr(target_lap, "lap_status", "racing") != "racing":
+        checks.append(
+            f"target lap is a '{target_lap.lap_status}' lap — not representative racing evidence"
+        )
+        score -= 0.3
+    if getattr(target_lap, "rival_lap_status", "racing") != "racing":
+        checks.append(
+            f"rival on a '{target_lap.rival_lap_status}' lap — no valid rival observation this lap"
+        )
+        score -= 0.15
+
     # --- rival-observation freshness ---
     freshness = 0
     for nl in reversed(lap_history):

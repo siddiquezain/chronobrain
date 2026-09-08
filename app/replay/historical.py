@@ -115,12 +115,34 @@ def lap_summary(snap: DecisionSnapshot, nl: Optional[NormalizedLap] = None) -> d
             "status": snap.data_quality.status,
             "quality_score": snap.data_quality.quality_score,
         },
-        "gap_to_rival_s": (nl.gap_to_car_ahead_s if nl is not None else None),
+        "gap_to_rival_s": _relative_gap(nl),
+        "rival_role": _rival_role(nl),
         "position": (nl.position if nl is not None else None),
         "drs": (nl.drs_available if nl is not None else None),
         "our_speed_kmh": (nl.our_speed_kmh if nl is not None else None),
+        "lap_status": (nl.lap_status if nl is not None else None),
+        "rival_lap_status": (nl.rival_lap_status if nl is not None else None),
         "trace": [{"stage": s.stage, "detail": s.detail} for s in snap.trace],
     }
+
+
+def _relative_gap(nl: Optional[NormalizedLap]) -> Optional[float]:
+    """The gap to the rival, whichever side they are on (None during a pit cycle)."""
+    if nl is None:
+        return None
+    return nl.gap_to_car_ahead_s if nl.gap_to_car_ahead_s is not None else nl.gap_to_car_behind_s
+
+
+def _rival_role(nl: Optional[NormalizedLap]) -> Optional[str]:
+    """'attacking' when the rival is the car ahead, 'defending' when they are the
+    car behind, 'clear' when there is no measurable relative gap (e.g. pit cycle)."""
+    if nl is None:
+        return None
+    if nl.gap_to_car_ahead_s is not None:
+        return "attacking"
+    if nl.gap_to_car_behind_s is not None:
+        return "defending"
+    return "clear"
 
 
 # ---------------------------------------------------------------------------

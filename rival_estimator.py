@@ -130,6 +130,11 @@ class RivalStateEstimator:
         self._n_observations = 0
         self._last_observation: Optional[dict] = None  # diagnostics only
 
+    @property
+    def observation_count(self) -> int:
+        """How many real observations have been folded in so far."""
+        return self._n_observations
+
     def predict(self) -> None:
         """Advance particle SoC estimates by one lap using the drift model."""
         cfg = self.config

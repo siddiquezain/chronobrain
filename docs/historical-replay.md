@@ -45,6 +45,26 @@ for lap N has `lap_list == [1..N]`) and
 `test_future_telemetry_cannot_change_a_lap_n_decision` (corrupt every lap > 8 with
 wild values → the Lap 8 decision is byte-identical).
 
+## Pit stops and who is ahead
+
+Two things the replay derives from **data available at lap N** (never the future):
+
+* **Ahead vs behind.** The relative gap is the unsigned cumulative lap-time
+  difference, but it is placed on the correct side using the drivers' real running
+  `Position` that lap (falling back to the cumulative-time sign). When our driver
+  leads, the gap is `gap_to_car_behind_s` and `gap_to_car_ahead_s` is `None` — so
+  the engine frames those laps as *defending*, and `PUSH_MODE` can actually be
+  selected. Before this, every lap was framed as "chase the rival ahead", even the
+  15 laps Leclerc led at Monza.
+* **Pit / out / invalid laps.** FastF1's `PitInTime` / `PitOutTime` / `IsAccurate`
+  mark a lap as `pit`, `out_lap` or `invalid_for_energy_inference` (a backstop also
+  trips on a lap time > 5 s off the rolling baseline). Such a lap keeps its raw
+  telemetry but is **not clean racing evidence**: its four rival observables are
+  dropped (the particle filter predicts, it does not update — a +20 s pit-lap
+  sector delta never collapses the posterior to "battery empty"), the relative gap
+  is withheld (no fake overtake window), our modelled SoC is carried across
+  unchanged, and the Data Quality Gate marks the lap `DEGRADED`.
+
 ## What is REAL vs MODELED
 
 | REAL (2024 FastF1 / official F1 timing) | MODELED (`MODEL_ASSUMPTION`) |
