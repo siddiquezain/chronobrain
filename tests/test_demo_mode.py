@@ -78,10 +78,15 @@ def test_ground_truth_never_in_production_decision():
     blob = json.dumps(r.json()).lower()
     assert "ground_truth" not in blob
     assert "rival_validation" not in blob
-    assert set(r.json()["rival"]) == {
+    rival = r.json()["rival"]
+    # the estimator contract is intact
+    assert {
         "mean_reserve_mj", "reserve_std_mj", "n_observations", "confidence",
         "estimate_uncertain", "bucket", "distribution", "freshness_laps", "p_defend",
-    }
+    } <= set(rival)
+    # strategic-rival fields exist but are inert on the synthetic path (no field data)
+    assert rival["driver"] is None and rival["role"] is None and rival["relevance_score"] is None
+    assert "actual" not in json.dumps(rival).lower() and "hidden" not in json.dumps(rival).lower()
 
 
 def test_ground_truth_present_only_in_demo_response():

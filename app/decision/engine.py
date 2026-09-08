@@ -191,9 +191,21 @@ def _thread_state(ctx: DecisionContext) -> None:
     estimator = RivalStateEstimator(config=cfg.rival_config(), seed=cfg.seed)
 
     banked = False
+    prev_rival_id: Optional[str] = None
     for i, nl in enumerate(ctx.lap_history):
         ti = to_telemetry_input(nl, overtake_qualified_last_lap=banked)
         gr = gate.evaluate(ti)
+
+        # Dynamic strategic rival: when the tracked opponent changes identity, the
+        # particle filter's posterior is about a DIFFERENT car — reset it to the
+        # prior so the new rival's energy is estimated fresh (honest: we have no
+        # prior information about a car we just started watching). Synthetic / fixed
+        # two-car replay carry strategic_rival=None -> this never fires.
+        rival_id = nl.strategic_rival.driver if nl.strategic_rival is not None else None
+        if rival_id is not None and prev_rival_id is not None and rival_id != prev_rival_id:
+            estimator = RivalStateEstimator(config=cfg.rival_config(), seed=cfg.seed)
+        if rival_id is not None:
+            prev_rival_id = rival_id
 
         obs = to_rival_observation(nl)
         if obs is not None:
@@ -463,15 +475,21 @@ def _fuse(ctx: DecisionContext) -> None:
             return DeploymentMode.CONSERVE_MODE
         return DeploymentMode.BALANCED_MODE
 
+    # An overtake mode is only a real "attack now" if there is in fact a car ahead
+    # to use it on. With directional strategic-rival selection the relevant rival
+    # can be BEHIND us (gap_to_car_ahead_s is None) — spending a banked bonus on
+    # empty track ahead is not an attack.
+    has_target_ahead = gap_ahead is not None
+
     def _attack_mode() -> DeploymentMode:
         """
         'Attack now' resolves to a specific mode:
-          - spend a banked bonus if we have one            -> USE_OVERTAKE_BONUS_MODE
-          - in proximity, no bonus banked yet              -> ARM_OVERTAKE_MODE
+          - a car ahead + a banked bonus                   -> USE_OVERTAKE_BONUS_MODE
+          - a car ahead in proximity, no bonus banked yet  -> ARM_OVERTAKE_MODE
             (attack this lap AND qualify next lap's bonus — the actual meaning of ARM)
           - otherwise fall back to the planner's aggressive pick (e.g. PUSH)
         """
-        if use_bonus_legal and ctx.overtake_bonus_banked:
+        if use_bonus_legal and ctx.overtake_bonus_banked and has_target_ahead:
             return DeploymentMode.USE_OVERTAKE_BONUS_MODE
         if arm_legal and in_proximity and not ctx.overtake_bonus_banked:
             return DeploymentMode.ARM_OVERTAKE_MODE
@@ -600,6 +618,16 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         energy_is_modeled=e.energy_is_modeled,
     )
 
+    sr = ctx.target_lap.strategic_rival
+    sr_fields = dict(
+        driver=(sr.driver if sr else None),
+        role=(sr.role if sr else None),
+        strategic_position=(sr.position if sr else None),
+        strategic_gap_s=(sr.gap_s if sr else None),
+        strategic_rival_ahead=(sr.ahead if sr else None),
+        relevance_score=(sr.relevance_score if sr else None),
+    )
+
     if ctx.rival is not None:
         r = ctx.rival
         rival_block = RivalBlock(
@@ -612,6 +640,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             distribution={k: round(v, 4) for k, v in r.distribution.items()},
             freshness_laps=r.freshness_laps,
             p_defend=r.p_defend,
+            **sr_fields,
         )
     else:
         rival_block = RivalBlock(
@@ -619,6 +648,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             confidence=0.0, estimate_uncertain=True, bucket="MEDIUM",
             distribution={"low": 0.0, "medium": 1.0, "high": 0.0},
             freshness_laps=len(ctx.lap_history), p_defend=0.0,
+            **sr_fields,
         )
 
     ranked = [

@@ -48,6 +48,27 @@ def build_trace(ctx: DecisionContext) -> List[TraceStep]:
             ),
         ))
 
+    sr = t.strategic_rival
+    if sr is not None:
+        prev = _prev_strategic_rival(ctx)
+        gap_txt = "n/a" if sr.gap_s is None else f"{sr.gap_s:.2f}s"
+        side = "ahead" if sr.ahead else ("behind" if sr.ahead is False else "n/a")
+        if prev is not None and prev != sr.driver:
+            steps.append(TraceStep(
+                stage="STRATEGIC_RIVAL_CHANGED",
+                detail=(
+                    f"{prev} -> {sr.driver} | now {sr.role} | P{sr.position} | "
+                    f"{gap_txt} {side} | relevance {sr.relevance_score:.2f}"
+                ),
+            ))
+        steps.append(TraceStep(
+            stage="STRATEGIC_RIVAL_SELECTED",
+            detail=(
+                f"{sr.driver} | role {sr.role} | P{sr.position} | {gap_txt} {side} | "
+                f"relevance {sr.relevance_score:.2f} | energy inferred from THIS car's observables"
+            ),
+        ))
+
     if ctx.rival is not None:
         d = ctx.rival.distribution
         steps.append(TraceStep(
@@ -164,6 +185,16 @@ def _fusion_detail(ctx: DecisionContext) -> str:
             return f"attack not worth the energy spend (reserve too low) -> {ctx.final_mode}"
         return f"no window worth committing energy to -> {ctx.final_mode}"
     return f"pick stands ({ctx.final_mode})"
+
+
+def _prev_strategic_rival(ctx: DecisionContext) -> str | None:
+    """The strategic-rival driver on the lap before the target (causal — it is
+    already in lap_history), or None."""
+    hist = ctx.lap_history
+    if len(hist) < 2:
+        return None
+    prev = hist[-2].strategic_rival
+    return prev.driver if prev is not None else None
 
 
 def _pf(ok: bool) -> str:

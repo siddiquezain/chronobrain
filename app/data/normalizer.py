@@ -19,7 +19,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from app.data.samples import DataMode, LapStatus, NormalizedLap, TelemetrySample
+from app.data.samples import (
+    DataMode,
+    LapStatus,
+    NormalizedLap,
+    StrategicRivalInfo,
+    TelemetrySample,
+)
 
 # Stack A contracts
 from rule_gate import GateConfig
@@ -119,6 +125,7 @@ def condense_lap(
     brake_baseline: Optional[float] = None,
     lap_status: LapStatus = "racing",
     rival_lap_status: LapStatus = "racing",
+    strategic_rival: Optional[StrategicRivalInfo] = None,
     source_detail: str = "",
 ) -> NormalizedLap:
     """
@@ -193,6 +200,7 @@ def condense_lap(
         drs_available=drs_open,
         lap_status=lap_status,
         rival_lap_status=rival_lap_status,
+        strategic_rival=strategic_rival,
         energy_is_modeled=True,
         raw_sample_count=len(our_samples),
         source_detail=source_detail,

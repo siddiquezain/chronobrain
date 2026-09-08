@@ -183,27 +183,39 @@ class TestPitStopAwareness:
         assert degraded.quality_score < good.quality_score
 
     @_needs_fastf1
-    def test_real_monza_pit_laps_do_not_collapse_the_rival_estimator(self):
+    def test_real_monza_no_lap_collapses_the_rival_estimator(self):
+        """No lap of the whole race (pit laps and rival-switch laps included) may
+        collapse the posterior to a confident LOW."""
         res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=53, seed=42)
-        by_lap = {L["lap"]: L for L in res["laps"]}
-        # PIA pits around laps 16-17 and 38-39. The old bug read those pit-lap
-        # sector deltas as "rival energy ~0 MJ, 100% LOW".
-        for lp in (16, 17, 38, 39):
-            rv = by_lap[lp]["rival_energy_inference"]
-            assert rv["bucket"] != "LOW" or rv["distribution"]["low"] < 0.9, (
-                f"lap {lp}: pit lap collapsed the rival estimate to {rv}"
-            )
+        for L in res["laps"]:
+            rv = L["rival_energy_inference"]
+            if rv["n_observations"] == 0:
+                continue                       # no estimate yet (lap 1, standing start)
             assert rv["std_mj"] >= 0.35
+            assert not (rv["bucket"] == "LOW" and rv["distribution"]["low"] >= 0.9), (
+                f"lap {L['lap']}: rival estimate collapsed to {rv}"
+            )
 
     @_needs_fastf1
-    def test_real_monza_pit_laps_are_not_perfect_quality_and_open_no_window(self):
+    def test_real_monza_our_pit_laps_degrade_quality_and_never_attack(self):
         res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=53, seed=42)
         by_lap = {L["lap"]: L for L in res["laps"]}
-        for lp in (16, 17, 38, 39):
+        # LEC's own stop: lap 15 (in) / lap 16 (out) are not clean racing evidence
+        for lp in (15, 16):
             L = by_lap[lp]
+            assert L["lap_status"] in ("pit", "out_lap")
             assert L["data_quality"]["status"] != "GOOD"
-            assert L["gap_to_rival_s"] is None            # no fake racing gap
-            assert L["decision"] != "ATTACK"              # no fake overtake window
+            assert L["decision"] != "ATTACK"
+
+    @_needs_fastf1
+    def test_real_monza_selector_never_gives_a_pitting_car_a_directional_role(self):
+        res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=53, seed=42)
+        for L in res["laps"]:
+            sr = L["strategic_rival"]
+            if sr["role"] in ("ATTACK_TARGET", "DEFENDING_THREAT"):
+                assert L["rival_lap_status"] == "racing", (
+                    f"lap {L['lap']}: {sr['role']} assigned to a {L['rival_lap_status']} car"
+                )
 
 
 # ===========================================================================

@@ -59,6 +59,23 @@ class TelemetrySample(BaseModel):
     soc_mj: Optional[float] = Field(None, ge=0.0)
 
 
+class StrategicRivalInfo(BaseModel):
+    """Which opponent the dynamic selector judged most relevant for THIS lap, and
+    why. The four `rival_*` observables below belong to `driver`. Absent (`None`)
+    for the synthetic path and the fixed two-car replay — behaviour is then exactly
+    as before this field existed."""
+
+    driver: str
+    role: str = Field(
+        "NONE",
+        description="ATTACK_TARGET | DEFENDING_THREAT | POSITION_BATTLE | STRATEGICALLY_RELEVANT | NONE",
+    )
+    position: Optional[int] = Field(None, ge=1)
+    gap_s: Optional[float] = Field(None, ge=0.0, description="Unsigned gap magnitude")
+    ahead: Optional[bool] = Field(None, description="True = rival ahead of us, False = behind")
+    relevance_score: float = Field(0.0, ge=0.0, le=1.0)
+
+
 class NormalizedLap(BaseModel):
     """
     One lap of ChronoPace-normalized state. The single contract between any
@@ -92,6 +109,11 @@ class NormalizedLap(BaseModel):
     )
 
     # --- rival kinematic observables (feed rival_estimator particle filter) ---
+    strategic_rival: Optional[StrategicRivalInfo] = Field(
+        None,
+        description="Dynamic-selection metadata: whose observables these are and why. "
+        "None => fixed rival (synthetic / two-car replay), behaviour unchanged.",
+    )
     rival_lap_status: LapStatus = Field(
         "racing", description="Rival's lap: when not 'racing' the four observables below are None"
     )

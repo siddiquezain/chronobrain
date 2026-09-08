@@ -59,7 +59,12 @@ GET /api/v1/health   → { status, service, version, fastf1_available }
   "rival":      { "mean_reserve_mj", "reserve_std_mj", "n_observations", "confidence",
                   "estimate_uncertain", "bucket",                     // LOW|MEDIUM|HIGH
                   "distribution": { "low", "medium", "high" },        // sums to 1
-                  "freshness_laps", "p_defend" },                     // P(rival actively defends)
+                  "freshness_laps", "p_defend",                       // P(rival actively defends)
+                  // dynamic strategic-rival selection — additive, null on the
+                  // synthetic path and the fixed two-car replay:
+                  "driver", "role",                                   // ATTACK_TARGET|DEFENDING_THREAT|POSITION_BATTLE|STRATEGICALLY_RELEVANT|NONE
+                  "strategic_position", "strategic_gap_s",
+                  "strategic_rival_ahead", "relevance_score" },
   "opportunity":{ "recommended_strategy", "prefers_wait", "foregone_strategy",
                   "foregone_value_gap_s", "future_energy_value_active", "opportunity_uncertain",
                   "opportunity_trend", "current_window_overtake_prob",
@@ -161,24 +166,31 @@ GET  /api/v1/replay/races
                     default_driver, default_rival, note } ] }
 
 POST /api/v1/replay/historical
-{ "race": "2024_italian_gp", "driver": "LEC", "rival": "PIA",
-  "start_lap": 1, "end_lap": 53, "seed": 42 }
+{ "race": "2024_italian_gp", "driver": "LEC", "rival": "PIA",   // rival = focus/fallback
+  "start_lap": 1, "end_lap": 53, "seed": 42, "dynamic_rival": true }
   -> {
        "race": { key, name, circuit, year, session, scheduled_laps,
                  laps_with_telemetry, driver, rival, note },
        "driver": "LEC", "rival": "PIA", "total_laps": 53,
        "laps_replayed": [1, 53],
        "source": "fastf1_historical_replay", "model": "chronopace_2026",
+       "strategic_rival": {                 // dynamic causal selection over the field
+         "dynamic": true, "focus_rival": "PIA", "selector": "...",
+         "drivers_tracked": ["NOR","OCO","PIA","SAI","VER"],
+         "changes": [ { lap, from, to, role, gap_s, relevance_score } ] },
        "provenance": { "REAL": [...], "MODELED (MODEL_ASSUMPTION)": [...], "note": "..." },
        "laps": [ {
          "lap": 11,
-         "decision": "ATTACK",          // ATTACK | WAIT | CONSERVE | HOLD | PUSH
-         "action": "USE_OVERTAKE_BONUS_MODE"-style ... "ATTACK_NOW",
-         "mode": "USE_OVERTAKE_BONUS_MODE",   // one of the 5 deployment modes
+         "decision": "PUSH",            // ATTACK | WAIT | CONSERVE | HOLD | PUSH
+         "action": "PUSH", "mode": "PUSH_MODE",
          "confidence": 0.60, "confidence_overridden": false, "override_reason": null,
          "reason_codes": [ ... ],
+         "strategic_rival": { "driver": "NOR", "role": "DEFENDING_THREAT",
+                              "position": 3, "gap_s": 0.59, "ahead": false,
+                              "relevance_score": 0.83 },
          "rival_energy_inference": {          // INFERRED, not measured — no ground truth
            "label": "RIVAL ENERGY INFERENCE (probabilistic, from observable performance)",
+           "driver": "NOR",                  // whose observables this estimate is built from
            "estimated_reserve_mj", "std_mj", "bucket", "distribution",
            "confidence", "n_observations", "p_defend" },
          "opportunity": { recommended_strategy, prefers_wait, opportunity_trend,
@@ -187,10 +199,12 @@ POST /api/v1/replay/historical
          "compliance": { legal, legal_modes },
          "energy": { soc_mj, can_afford_aggressive, energy_is_modeled:true },
          "data_quality": { status, quality_score },
-         "gap_to_rival_s", "position", "drs", "our_speed_kmh",
-         "trace": [ { stage, detail } ]        // the same 11-step deterministic trace
+         "gap_to_rival_s", "rival_role", "position", "drs", "our_speed_kmh",
+         "lap_status", "rival_lap_status",
+         "trace": [ { stage, detail } ]        // + STRATEGIC_RIVAL_SELECTED / _CHANGED
        } ]
      }
+// dynamic_rival:false  -> the original fixed two-car analysis against `rival`.
 
 GET  /api/v1/replay/historical/{race}/{lap}?driver=LEC&rival=PIA&seed=42&full_snapshot=false
   -> { race, lap, censored_to_lap: {lap}, summary: <one lap object>,

@@ -37,7 +37,7 @@ def real_monza_loaded():
                            our_driver="LEC", rival_driver="PIA", scheduled_laps=53)
     except FastF1Unavailable as exc:
         pytest.skip(f"session unavailable: {exc}")
-    H._SESSION_CACHE[(race.key, "LEC", "PIA")] = laps
+    H._SESSION_CACHE[H.session_cache_key(race.key, "LEC", "PIA", False)] = laps
     return laps
 
 
@@ -67,10 +67,12 @@ def _fixture_laps(n=20, rival_pattern="steady") -> list[NormalizedLap]:
 
 @pytest.fixture
 def offline_race(monkeypatch):
-    """Pre-populate the replay session cache so no fastf1 call happens."""
+    """Pre-populate the replay session cache so no fastf1 call happens. These tests
+    exercise pipeline mechanics on a fixed two-car fixture (dynamic_rival=False);
+    the dynamic strategic-rival path has its own tests."""
     H.clear_session_cache()
     race = resolve_race("2024_italian_gp")
-    H._SESSION_CACHE[(race.key, "LEC", "PIA")] = _fixture_laps(20)
+    H._SESSION_CACHE[H.session_cache_key(race.key, "LEC", "PIA", False)] = _fixture_laps(20)
     yield race
     H.clear_session_cache()
 
@@ -103,7 +105,8 @@ def test_lap_n_provider_contains_only_laps_up_to_n(offline_race, monkeypatch):
         return real(provider, lap=lap, config=config, **kw)
 
     monkeypatch.setattr(H, "run_decision", spy)
-    run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=15, seed=42)
+    run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=15, seed=42,
+                          dynamic_rival=False)
 
     for n, lap_list in seen.items():
         assert max(lap_list) == n, f"lap {n} decision saw future lap {max(lap_list)}"
@@ -111,18 +114,20 @@ def test_lap_n_provider_contains_only_laps_up_to_n(offline_race, monkeypatch):
 
 
 def test_future_telemetry_cannot_change_a_lap_n_decision(offline_race):
-    base = run_historical_replay(race_key="2024_italian_gp", start_lap=8, end_lap=8, seed=42)
+    base = run_historical_replay(race_key="2024_italian_gp", start_lap=8, end_lap=8, seed=42,
+                                 dynamic_rival=False)
     lap8_a = base["laps"][0]
 
     # now corrupt every lap AFTER 8 with wild values and replay lap 8 again
     race = resolve_race("2024_italian_gp")
-    laps = H._SESSION_CACHE[(race.key, "LEC", "PIA")]
+    laps = H._SESSION_CACHE[H.session_cache_key(race.key, "LEC", "PIA", False)]
     for nl in laps:
         if nl.lap > 8:
             nl.rival_terminal_speed_kmh = 999.0
             nl.gap_to_car_ahead_s = 0.01
             nl.our_soc_mj = 9.0
-    lap8_b = run_historical_replay(race_key="2024_italian_gp", start_lap=8, end_lap=8, seed=42)["laps"][0]
+    lap8_b = run_historical_replay(race_key="2024_italian_gp", start_lap=8, end_lap=8, seed=42,
+                                   dynamic_rival=False)["laps"][0]
 
     assert lap8_a == lap8_b, "future-lap corruption changed the Lap 8 decision"
 
@@ -131,11 +136,13 @@ def test_future_telemetry_cannot_change_a_lap_n_decision(offline_race):
 # 4. determinism
 # ---------------------------------------------------------------------------
 def test_replay_is_deterministic(offline_race):
-    a = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=18, seed=42)
-    b = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=18, seed=42)
+    a = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=18, seed=42,
+                              dynamic_rival=False)
+    b = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=18, seed=42,
+                              dynamic_rival=False)
     assert a["laps"] == b["laps"]
-    a2 = run_historical_lap(race_key="2024_italian_gp", lap=12, seed=42)
-    b2 = run_historical_lap(race_key="2024_italian_gp", lap=12, seed=42)
+    a2 = run_historical_lap(race_key="2024_italian_gp", lap=12, seed=42, dynamic_rival=False)
+    b2 = run_historical_lap(race_key="2024_italian_gp", lap=12, seed=42, dynamic_rival=False)
     assert a2 == b2
 
 
@@ -162,20 +169,22 @@ def test_rival_observation_has_no_soc_field():
 
 def test_historical_response_never_exposes_ground_truth(offline_race):
     import json
-    res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=20, seed=42)
+    res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=20, seed=42,
+                                dynamic_rival=False)
     blob = json.dumps(res).lower()
     for forbidden in ("ground_truth", "actual_soc", "rival_actual", "hidden_soc", "real_soc"):
         assert forbidden not in blob
     lap = res["laps"][5]
     assert "RIVAL ENERGY INFERENCE" in lap["rival_energy_inference"]["label"]
     assert set(lap["rival_energy_inference"]) == {
-        "label", "estimated_reserve_mj", "std_mj", "bucket",
+        "label", "driver", "estimated_reserve_mj", "std_mj", "bucket",
         "distribution", "confidence", "n_observations", "p_defend",
     }
 
 
 def test_estimator_maintains_uncertainty_over_the_replay(offline_race):
-    res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=20, seed=42)
+    res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=20, seed=42,
+                                dynamic_rival=False)
     stds = [L["rival_energy_inference"]["std_mj"] for L in res["laps"]]
     assert all(s >= 0.35 for s in stds)          # floor, never collapses
     n_obs = [L["rival_energy_inference"]["n_observations"] for L in res["laps"]]

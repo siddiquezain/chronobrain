@@ -21,7 +21,11 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence
 
 from app.data.normalizer import ReplayEnergyModel, condense_lap
-from app.data.samples import NormalizedLap, TelemetrySample
+from app.data.samples import NormalizedLap, StrategicRivalInfo, TelemetrySample
+
+# NOTE: app.replay.strategic_rival is imported lazily inside load_replay() — it
+# lives under app.replay, whose __init__ imports historical -> fastf1_service, so
+# a module-level import here would be circular.
 
 _DEFAULT_CACHE = ".fastf1_cache"
 
@@ -111,17 +115,26 @@ def load_replay(
     energy_model: Optional[ReplayEnergyModel] = None,
     label: Optional[str] = None,
     scheduled_laps: Optional[int] = None,
+    dynamic_rival: bool = False,
+    selector_config=None,
 ) -> List[NormalizedLap]:
     """
     Load a historical session and return causal per-lap `NormalizedLap`s for
-    `our_driver`, with `rival_driver`'s kinematics attached as particle-filter
-    observations.
+    `our_driver`.
+
+    `dynamic_rival=False` (default): `rival_driver` is the fixed opponent every
+    lap — the focused two-car analysis, unchanged.
+
+    `dynamic_rival=True`: the STRATEGIC rival is re-selected every lap from the
+    whole field (`app.replay.strategic_rival`), using only data up to that lap.
+    `rival_driver` becomes the *focus / fallback* rival (used on laps where no
+    opponent clears the relevance floor). The selected rival's kinematics are the
+    ones attached as particle-filter observations; `NormalizedLap.strategic_rival`
+    records who and why.
 
     ANTI-HINDSIGHT: every field on lap N is derived from lap N alone plus rolling
-    statistics of laps < N (throttle/brake baselines, rival sector-delta baseline,
-    cumulative gap). `scheduled_laps` (the pre-race race distance, a constant from
-    the race registry) is used for `total_laps` rather than the actually-completed
-    count. Downstream, `run_decision(provider, lap=N)` censors again to laps <= N.
+    statistics of laps < N. `scheduled_laps` (pre-race race distance) is used for
+    `total_laps`. Downstream, `run_decision(provider, lap=N)` censors again.
 
     Raises `FastF1Unavailable` if `fastf1` is missing or the session cannot load.
     """
@@ -148,6 +161,19 @@ def load_replay(
             f"could not load {year} {event} {session} from FastF1 "
             f"(offline, cache miss, or unknown session): {exc}"
         ) from exc
+
+    ev_name = event
+    try:
+        ev_name = ses.event["EventName"]
+    except Exception:
+        pass
+    model = energy_model or ReplayEnergyModel()
+
+    if dynamic_rival:
+        return _load_replay_dynamic(
+            ses, year, ev_name, session, our_driver, rival_driver, laps,
+            scheduled_laps, model, label, selector_config,
+        )
 
     our_samples = _driver_lap_samples(ses, our_driver)
     rival_samples = _driver_lap_samples(ses, rival_driver)
@@ -176,12 +202,6 @@ def load_replay(
         )
     total_laps = int(scheduled_laps or ses.total_laps or lap_numbers[-1])
 
-    model = energy_model or ReplayEnergyModel()
-    ev_name = event
-    try:
-        ev_name = ses.event["EventName"]
-    except Exception:
-        pass
     src = label or f"{year} {ev_name} {session}, {our_driver} vs {rival_driver}"
 
     # rolling (causal) baselines — built from RACING laps only so a pit lap never
@@ -234,6 +254,146 @@ def load_replay(
             brake_baseline=brk_base.get(ln, all_brk.get(ln)),
             lap_status=o_status,
             rival_lap_status=r_status,
+            source_detail=src,
+        )
+        prev_soc = nl.our_soc_mj
+        out.append(nl)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# dynamic strategic-rival path
+# ---------------------------------------------------------------------------
+def _load_replay_dynamic(
+    ses,
+    year: int,
+    ev_name,
+    session: str,
+    our_driver: str,
+    focus_rival: str,
+    laps: Optional[Sequence[int]],
+    scheduled_laps: Optional[int],
+    model: ReplayEnergyModel,
+    label: Optional[str],
+    selector_config,
+) -> List[NormalizedLap]:
+    # lazy import — app.replay.__init__ -> historical -> fastf1_service is circular
+    from app.replay.strategic_rival import LapFieldEntry, build_strategic_rivals
+
+    all_drivers = _field_drivers(ses)
+    if our_driver not in all_drivers:
+        raise FastF1Unavailable(f"no laps for {our_driver!r} in {year} {ev_name} {session}")
+
+    status_by_driver = {d: _lap_status_by_lap(ses, d) for d in all_drivers}
+    pos_by_driver = {d: _positions_by_lap(ses, d) for d in all_drivers}
+    cum_by_driver = {d: _cumulative_laptime(ses, d) for d in all_drivers}
+    laptime_by_driver = {d: _laptimes_by_lap(ses, d) for d in all_drivers}
+
+    field: Dict[str, Dict[int, LapFieldEntry]] = {}
+    for d in all_drivers:
+        rows: Dict[int, LapFieldEntry] = {}
+        for ln in sorted(pos_by_driver[d]):
+            rows[ln] = LapFieldEntry(
+                driver=d, lap=ln,
+                position=pos_by_driver[d].get(ln),
+                cum_time_s=cum_by_driver[d].get(ln),
+                lap_time_s=laptime_by_driver[d].get(ln),
+                lap_status=status_by_driver[d].get(ln, "racing"),
+            )
+        field[d] = rows
+
+    our_laps = sorted(field[our_driver])
+    if laps is not None:
+        wanted = set(laps)
+        our_laps = [ln for ln in our_laps if ln in wanted]
+    if not our_laps:
+        raise FastF1Unavailable(f"no laps for {our_driver!r} to replay")
+    total_laps = int(scheduled_laps or getattr(ses, "total_laps", 0) or our_laps[-1])
+
+    rivals_by_lap = build_strategic_rivals(
+        field, our_driver, our_laps,
+        config=selector_config, fallback_driver=focus_rival,
+    )
+
+    # load per-lap samples only for the drivers actually needed
+    needed = {our_driver, focus_rival} | {
+        sr.driver for sr in rivals_by_lap.values() if sr.driver
+    }
+    samples_by_driver = {
+        d: _driver_lap_samples(ses, d) for d in needed if d in all_drivers
+    }
+    if our_driver not in samples_by_driver or not samples_by_driver[our_driver]:
+        raise FastF1Unavailable(f"no telemetry for {our_driver!r}")
+
+    # per-driver causal lap-time baselines for the selected rival's sector delta
+    laptime_baselines = {
+        d: _rival_lap_time_baseline(samples_by_driver.get(d, {}), status_by_driver.get(d))
+        for d in samples_by_driver
+    }
+
+    our_samples = samples_by_driver[our_driver]
+    our_status = status_by_driver[our_driver]
+    our_thr = {
+        ln: _mean_channel(s, "throttle")
+        for ln, s in our_samples.items()
+        if our_status.get(ln, "racing") == "racing"
+    }
+    our_brk = {
+        ln: _mean_channel(s, "brake")
+        for ln, s in our_samples.items()
+        if our_status.get(ln, "racing") == "racing"
+    }
+    thr_base = _rolling_mean(our_thr)
+    brk_base = _rolling_mean(our_brk)
+    all_thr = {ln: _mean_channel(s, "throttle") for ln, s in our_samples.items()}
+    all_brk = {ln: _mean_channel(s, "brake") for ln, s in our_samples.items()}
+
+    src = label or f"{year} {ev_name} {session}, {our_driver} vs field (dynamic rival)"
+
+    out: List[NormalizedLap] = []
+    prev_soc: Optional[float] = None
+    for ln in our_laps:
+        if ln not in our_samples:
+            continue
+        sr = rivals_by_lap.get(ln)
+        rival_drv = (sr.driver if sr and sr.driver else focus_rival)
+        rival_samples_n = samples_by_driver.get(rival_drv, {}).get(ln, [])
+        r_status = status_by_driver.get(rival_drv, {}).get(ln, "racing")
+        o_status = our_status.get(ln, "racing")
+
+        # direction + gap come straight from the selector (it already did the
+        # signed-gap / position work, causally).
+        we_lead = (sr.ahead is False) if (sr and sr.ahead is not None) else False
+        gap_usable = (
+            sr.gap_s if (sr and sr.gap_s is not None
+                         and o_status == "racing" and r_status == "racing")
+            else None
+        )
+
+        sri = None
+        if sr is not None:
+            sri = StrategicRivalInfo(
+                driver=rival_drv, role=sr.role, position=sr.position,
+                gap_s=sr.gap_s, ahead=sr.ahead,
+                relevance_score=sr.relevance_score,
+            )
+
+        nl = condense_lap(
+            our_samples[ln],
+            rival_samples_n,
+            lap=ln,
+            total_laps=total_laps,
+            data_mode="REPLAY",
+            prev_soc_mj=prev_soc,
+            gap_to_car_ahead_s=(None if we_lead else gap_usable),
+            gap_to_car_behind_s=(gap_usable if we_lead else None),
+            energy_model=model,
+            rival_sector_baseline_s=laptime_baselines.get(rival_drv, {}).get(ln),
+            throttle_baseline=thr_base.get(ln, all_thr.get(ln)),
+            brake_baseline=brk_base.get(ln, all_brk.get(ln)),
+            lap_status=o_status,
+            rival_lap_status=r_status,
+            strategic_rival=sri,
             source_detail=src,
         )
         prev_soc = nl.our_soc_mj
@@ -370,6 +530,34 @@ def _we_lead(
     if our_pos is not None and rival_pos is not None:
         return our_pos < rival_pos
     return our_cum is not None and rival_cum is not None and our_cum < rival_cum
+
+
+def _laptimes_by_lap(session, driver: str) -> Dict[int, float]:
+    d = session.laps.pick_drivers(driver) if hasattr(session.laps, "pick_drivers") else session.laps.pick_driver(driver)
+    out: Dict[int, float] = {}
+    for _, lap in d.iterlaps():
+        lt = lap["LapTime"]
+        secs = _to_seconds(lt) if lt is not None and not _is_nan(lt) else None
+        if secs is not None:
+            out[int(lap["LapNumber"])] = round(secs, 3)
+    return out
+
+
+def _field_drivers(session) -> List[str]:
+    """Every driver with at least one lap in this session, as 3-letter codes."""
+    try:
+        codes = sorted({str(x) for x in session.laps["Driver"].unique() if x is not None and not _is_nan(x)})
+        if codes:
+            return codes
+    except Exception:
+        pass
+    out: List[str] = []
+    for num in getattr(session, "drivers", []) or []:
+        try:
+            out.append(str(session.get_driver(num)["Abbreviation"]))
+        except Exception:
+            continue
+    return sorted(set(out))
 
 
 def _cumulative_laptime(session, driver: str) -> Dict[int, float]:

@@ -45,6 +45,42 @@ for lap N has `lap_list == [1..N]`) and
 `test_future_telemetry_cannot_change_a_lap_n_decision` (corrupt every lap > 8 with
 wild values → the Lap 8 decision is byte-identical).
 
+## Dynamic strategic-rival selection
+
+A real race is not a permanent two-car duel. `POST /api/v1/replay/historical`
+(`dynamic_rival: true`, the default) re-selects the opponent that matters **every
+lap**, from the whole field, using only data up to that lap:
+
+```
+full field (all drivers' position / gap / trend / pace / pit status, <= lap N)
+      -> app.replay.strategic_rival.build_strategic_rivals   (deterministic score)
+      -> the SELECTED rival's observable kinematics
+      -> the existing Rival Energy Estimator (particle filter)
+      -> opportunity / Monte Carlo / gates / decision   (unchanged)
+```
+
+* The score is `w_proximity·proximity + w_adjacency·adjacency +
+  w_gap_trend·trend + w_pace·pace + w_directional·directional`, damped for a
+  pitting car or a car past the strategic gap ceiling. All weights/thresholds are
+  in `RivalSelectorConfig` (MODEL_ASSUMPTION — a deterministic model, not learned).
+* Role is directional: `ATTACK_TARGET` (rival ahead, in range), `DEFENDING_THREAT`
+  (rival behind, in range), `POSITION_BATTLE` (adjacent in the order), or `NONE`
+  (nobody worth spending energy against — the decision still runs).
+* When the tracked opponent's **identity changes**, the particle filter is reset
+  to its prior — we have no prior information about a car we just started watching.
+* `rival:` in the snapshot gains `driver` / `role` / `strategic_position` /
+  `strategic_gap_s` / `strategic_rival_ahead` / `relevance_score` (all additive;
+  `None` on the synthetic path and the fixed two-car replay). The trace emits
+  `STRATEGIC_RIVAL_SELECTED` and `STRATEGIC_RIVAL_CHANGED`.
+* `dynamic_rival: false` keeps the original fixed two-car analysis against `rival`.
+* The `rival` request parameter is now the **focus / fallback** rival (used on
+  laps where no opponent clears the relevance floor).
+
+2024 Monza (LEC): the selector tracks **NOR, PIA, SAI, VER, OCO** across the race
+— NOR/PIA in the opening stint, midfield cars during Leclerc's out-lap recovery,
+SAI while Piastri pits late, PIA again as Piastri closes to the flag. Twelve
+switches, all causal.
+
 ## Pit stops and who is ahead
 
 Two things the replay derives from **data available at lap N** (never the future):

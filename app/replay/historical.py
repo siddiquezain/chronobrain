@@ -25,20 +25,28 @@ _DEFAULT_CACHE = ".fastf1_cache"
 _SESSION_CACHE: Dict[Tuple[str, str, str], List[NormalizedLap]] = {}
 
 
+def session_cache_key(race_key: str, driver: str, rival: str, dynamic_rival: bool) -> Tuple:
+    """The `_SESSION_CACHE` key for a (race, pairing, mode). Public so tests can
+    pre-seed the cache and stay offline."""
+    return (race_key, driver.upper(), rival.upper(), f"dyn={bool(dynamic_rival)}")
+
+
 def _load_race_laps(
-    race: HistoricalRace, driver: str, rival: str, cache_dir: str
+    race: HistoricalRace, driver: str, rival: str, cache_dir: str,
+    dynamic_rival: bool = True,
 ) -> List[NormalizedLap]:
-    key = (race.key, driver.upper(), rival.upper())
+    key = session_cache_key(race.key, driver, rival, dynamic_rival)
     if key not in _SESSION_CACHE:
         _SESSION_CACHE[key] = load_replay(
             year=race.year,
             event=race.event,
             session=race.session,
             our_driver=driver.upper(),
-            rival_driver=rival.upper(),
+            rival_driver=rival.upper(),   # focus / fallback rival when dynamic
             cache_dir=cache_dir,
             label=race.name,
             scheduled_laps=race.scheduled_laps,
+            dynamic_rival=dynamic_rival,
         )
     return _SESSION_CACHE[key]
 
@@ -74,8 +82,17 @@ def lap_summary(snap: DecisionSnapshot, nl: Optional[NormalizedLap] = None) -> d
         "confidence_overridden": d.confidence_overridden,
         "override_reason": d.override_reason or None,
         "reason_codes": snap.reason_codes,
+        "strategic_rival": {   # who matters this lap and why (dynamic causal selection)
+            "driver": r.driver,
+            "role": r.role,
+            "position": r.strategic_position,
+            "gap_s": r.strategic_gap_s,
+            "ahead": r.strategic_rival_ahead,
+            "relevance_score": r.relevance_score,
+        },
         "rival_energy_inference": {   # inferred from observable performance — NOT measured
             "label": "RIVAL ENERGY INFERENCE (probabilistic, from observable performance)",
+            "driver": r.driver,   # whose observables this estimate is built from
             "estimated_reserve_mj": r.mean_reserve_mj,
             "std_mj": r.reserve_std_mj,
             "bucket": r.bucket,
@@ -164,11 +181,12 @@ def run_historical_lap(
     seed: int = 42,
     cache_dir: str = _DEFAULT_CACHE,
     full_snapshot: bool = False,
+    dynamic_rival: bool = True,
 ) -> dict:
     race = resolve_race(race_key)
     drv = (driver or race.default_driver).upper()
     riv = (rival or race.default_rival).upper()
-    full = _load_race_laps(race, drv, riv, cache_dir)
+    full = _load_race_laps(race, drv, riv, cache_dir, dynamic_rival)
     available = [nl.lap for nl in full]
     if lap not in available:
         raise ValueError(f"lap {lap} not in the replay ({min(available)}..{max(available)})")
@@ -196,11 +214,12 @@ def run_historical_replay(
     end_lap: Optional[int] = None,
     seed: int = 42,
     cache_dir: str = _DEFAULT_CACHE,
+    dynamic_rival: bool = True,
 ) -> dict:
     race = resolve_race(race_key)
     drv = (driver or race.default_driver).upper()
     riv = (rival or race.default_rival).upper()
-    full = _load_race_laps(race, drv, riv, cache_dir)
+    full = _load_race_laps(race, drv, riv, cache_dir, dynamic_rival)
     available = [nl.lap for nl in full]
     start = max(start_lap, min(available))
     end = min(end_lap or max(available), max(available))
@@ -215,6 +234,8 @@ def run_historical_replay(
         snap = run_decision(provider, lap=n, config=cfg)
         laps_out.append(lap_summary(snap, by_lap[n]))
 
+    changes = _strategic_rival_changes(full, start, end)
+
     return {
         "race": _race_meta(race, drv, riv, len(available)),
         "driver": drv,
@@ -223,26 +244,66 @@ def run_historical_replay(
         "laps_replayed": [start, end],
         "source": "fastf1_historical_replay",
         "model": "chronopace_2026",
+        "strategic_rival": {
+            "dynamic": dynamic_rival,
+            "focus_rival": riv,
+            "selector": "app.replay.strategic_rival (deterministic, causal)",
+            "note": (
+                "The rival is re-selected from the full field every lap using only data "
+                "<= that lap. 'focus_rival' is the fallback when no opponent is relevant."
+                if dynamic_rival else
+                "Fixed two-car analysis: the rival is the configured driver every lap."
+            ),
+            "changes": changes,
+            "drivers_tracked": sorted({
+                nl.strategic_rival.driver for nl in full
+                if nl.strategic_rival is not None and nl.strategic_rival.driver
+            }),
+        },
         "provenance": {
             "REAL": [
                 "2024 lap & sector timing, speed, throttle, brake, gear, RPM, DRS, distance "
                 "(FastF1 / official F1 timing)",
-                "actual observable driver performance lap by lap",
-                "relative gap (cumulative lap-time difference through lap N)",
+                "actual observable driver performance lap by lap, for the whole field",
+                "running positions and relative gaps (cumulative lap-time difference through lap N)",
             ],
             "MODELED (MODEL_ASSUMPTION)": [
-                "rival hidden energy state — INFERRED probabilistically from observable "
-                "performance; the 2024 cars' real ERS SoC is not public and is never used",
+                "which opponent is 'strategically relevant' — a deterministic score over "
+                "observable position / gap / trend / pace (app.replay.strategic_rival)",
+                "rival hidden energy state — INFERRED probabilistically from the SELECTED "
+                "rival's observable performance; no car's real ERS SoC is public or used",
                 "our own SoC / energy budget — a 2026-model mean-reverting trajectory "
                 "(energy_is_modeled=true on every lap)",
                 "the ChronoPace 2026 decision model, Monte Carlo outcomes, opportunity "
                 "probabilities, and regulatory-legality assumptions",
             ],
             "note": "2024 cars did NOT run under ChronoPace's 2026 energy rules. Real 2024 "
-                    "telemetry flows through the 2026 decision model.",
+                    "telemetry flows through the 2026 decision model. "
+                    "HISTORICAL TELEMETRY REPLAY · CHRONOPACE 2026 MODEL.",
         },
         "laps": laps_out,
     }
+
+
+def _strategic_rival_changes(full: List[NormalizedLap], start: int, end: int) -> List[dict]:
+    """Laps within [start, end] where the selected strategic rival's identity changed."""
+    out: List[dict] = []
+    prev: Optional[str] = None
+    for nl in sorted(full, key=lambda n: n.lap):
+        if nl.strategic_rival is None:
+            continue
+        cur = nl.strategic_rival.driver
+        if prev is not None and cur != prev and start <= nl.lap <= end:
+            out.append({
+                "lap": nl.lap,
+                "from": prev,
+                "to": cur,
+                "role": nl.strategic_rival.role,
+                "gap_s": nl.strategic_rival.gap_s,
+                "relevance_score": nl.strategic_rival.relevance_score,
+            })
+        prev = cur
+    return out
 
 
 def _race_meta(race: HistoricalRace, drv: str, riv: str, n_available: int) -> dict:

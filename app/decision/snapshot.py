@@ -48,6 +48,22 @@ class RivalBlock(BaseModel):
     freshness_laps: int = Field(0, ge=0, description="Laps since the last usable rival observation")
     p_defend: float = Field(0.0, ge=0.0, le=1.0, description="Deterministic P(rival actively defends)")
 
+    # --- dynamic strategic-rival selection (additive; None for the fixed two-car
+    #     replay and the synthetic path — the energy estimate above is then for the
+    #     single configured rival exactly as before) ---
+    driver: Optional[str] = Field(
+        None, description="Whose observable performance the estimate above is inferred from"
+    )
+    role: Optional[str] = Field(
+        None, description="ATTACK_TARGET | DEFENDING_THREAT | POSITION_BATTLE | STRATEGICALLY_RELEVANT | NONE"
+    )
+    strategic_position: Optional[int] = Field(None, ge=1, description="Rival's running position this lap")
+    strategic_gap_s: Optional[float] = Field(None, ge=0.0, description="Gap to the strategic rival (unsigned)")
+    strategic_rival_ahead: Optional[bool] = Field(None, description="True = rival ahead of us")
+    relevance_score: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="How strategically relevant this opponent is right now"
+    )
+
 
 class DataQualityBlock(BaseModel):
     status: str = Field(..., description="GOOD | DEGRADED | INVALID")

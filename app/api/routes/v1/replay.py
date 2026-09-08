@@ -26,10 +26,19 @@ router = APIRouter(prefix="/api/v1/replay", tags=["replay"])
 class HistoricalReplayRequest(BaseModel):
     race: str = Field("2024_italian_gp", description="race key (see GET /api/v1/replay/races)")
     driver: Optional[str] = Field(None, description="3-letter code; defaults from the registry (LEC)")
-    rival: Optional[str] = Field(None, description="3-letter code; defaults from the registry (PIA)")
+    rival: Optional[str] = Field(
+        None,
+        description="3-letter code; the FOCUS / fallback rival (default PIA). With "
+        "dynamic_rival the strategic rival is re-selected from the field each lap.",
+    )
     start_lap: int = 1
     end_lap: Optional[int] = None
     seed: int = 42
+    dynamic_rival: bool = Field(
+        True,
+        description="Re-select the strategically relevant opponent from the full field "
+        "every lap (causal). False = fixed two-car analysis against `rival`.",
+    )
 
 
 @router.get("/races")
@@ -54,6 +63,7 @@ def historical_replay(req: HistoricalReplayRequest) -> dict:
         return run_historical_replay(
             race_key=req.race, driver=req.driver, rival=req.rival,
             start_lap=req.start_lap, end_lap=req.end_lap, seed=req.seed,
+            dynamic_rival=req.dynamic_rival,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -69,12 +79,12 @@ def historical_replay(req: HistoricalReplayRequest) -> dict:
 @router.get("/historical/{race}/{lap}")
 def historical_lap(
     race: str, lap: int, driver: Optional[str] = None, rival: Optional[str] = None,
-    seed: int = 42, full_snapshot: bool = False,
+    seed: int = 42, full_snapshot: bool = False, dynamic_rival: bool = True,
 ) -> dict:
     try:
         return run_historical_lap(
             race_key=race, driver=driver, rival=rival, lap=lap, seed=seed,
-            full_snapshot=full_snapshot,
+            full_snapshot=full_snapshot, dynamic_rival=dynamic_rival,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc

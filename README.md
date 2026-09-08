@@ -118,14 +118,17 @@ curl -s -X POST localhost:8000/api/v1/demo/rival-trace \
 
 ## Historical race replay
 
-`/api/v1/replay/*` — replay a real F1 race (first: **2024 Italian GP, LEC vs PIA**)
-through the same pipeline, lap by lap, using only data available up to the current
-lap. Needs `pip install -r requirements-fastf1.txt`. See **[docs/historical-replay.md](docs/historical-replay.md)**.
+`/api/v1/replay/*` — replay a real F1 race (first: **2024 Italian GP**, our
+driver **LEC**) through the same pipeline, lap by lap, using only data available
+up to the current lap. The **strategic rival is re-selected from the whole field
+every lap** (`app.replay.strategic_rival`) — NOR/PIA/SAI/VER/OCO across 2024
+Monza — so the Rival Energy Estimator follows whoever actually matters. Needs
+`pip install -r requirements-fastf1.txt`. See **[docs/historical-replay.md](docs/historical-replay.md)**.
 
 ```bash
 curl -s -X POST localhost:8000/api/v1/replay/historical \
   -d '{"race":"2024_italian_gp","start_lap":1,"end_lap":53,"seed":42}' \
-  -H 'content-type: application/json' | jq '.laps[1].decision'
+  -H 'content-type: application/json' | jq '.strategic_rival.changes, .laps[10].strategic_rival'
 ```
 
 ## Docs
