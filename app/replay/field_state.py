@@ -61,6 +61,10 @@ _TREND_WINDOW_S = 6.0
 # adjacency (both anchored to real timing) can. MODEL_ASSUMPTION.
 _TREND_CLAMP_S_PER_LAP = 0.5
 _EARLY_LAPS_FOR_CONSTANTS = 6    # track length / ref lap-time use only laps 2..6
+# The relevance score itself is EMA-smoothed (causally) before the switching
+# policy sees it — a *strategic* rival should not respond to sub-2 s score noise
+# from the gap reconstruction. MODEL_ASSUMPTION.
+_REL_EMA_WINDOW_S = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -289,14 +293,18 @@ class FieldTimeline:
         return out
 
     # -- vectorised relevance over the whole race --------------------
-    def relevance_matrix(self, cfg: Optional[RivalSelectorConfig] = None) -> np.ndarray:
+    def relevance_matrix(self, cfg: Optional[RivalSelectorConfig] = None, *, smooth: bool = True) -> np.ndarray:
         cfg = cfg or RivalSelectorConfig()
         rel = score_matrix(
             gap_s=self._gap_s, ahead=self._ahead, gap_trend=self._trend,
             pace_delta=self._pace, positions_apart=self._apart, status_code=self._status,
             cfg=cfg,
         )
-        return np.where(self._present, rel, -1.0)
+        if smooth:
+            for j in range(rel.shape[1]):
+                col = np.where(self._present[:, j], rel[:, j], np.nan)
+                rel[:, j] = _causal_ema(self.ticks, col, _REL_EMA_WINDOW_S)
+        return np.where(self._present, np.round(rel, 4), -1.0)
 
     # -- the tick-level selection stream ----------------------------
     def selection_timeline(self, config: Optional[RivalSelectorConfig] = None) -> List[TickSelection]:
