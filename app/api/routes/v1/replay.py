@@ -18,6 +18,10 @@ from pydantic import BaseModel, Field
 
 from app.data.fastf1_service import FastF1Unavailable, fastf1_available
 from app.replay import HISTORICAL_RACES, run_historical_lap, run_historical_replay
+from app.replay.discovery import SeasonUnavailable
+from app.replay.discovery import list_races as _disc_races
+from app.replay.discovery import list_seasons as _disc_seasons
+from app.replay.discovery import list_sessions as _disc_sessions
 from app.replay.historical import strategic_rival_timeline
 
 logger = logging.getLogger(__name__)
@@ -40,12 +44,40 @@ class HistoricalReplayRequest(BaseModel):
         description="Re-select the strategically relevant opponent from the full field "
         "every lap (causal). False = fixed two-car analysis against `rival`.",
     )
+    # --- ad-hoc race from the FastF1 schedule (instead of a registry `race` key) ---
+    season: Optional[int] = Field(None, description="e.g. 2023 — with `event`, replays any scheduled race")
+    event: Optional[str] = Field(None, description="Grand Prix name or round number (see GET /races?season=)")
+    session: Optional[str] = Field(None, description="session code (R, Q, S, FP1..). Default R")
+
+
+# ---------------------------------------------------------------------------
+# discovery — Season -> Grand Prix -> Session
+# ---------------------------------------------------------------------------
+@router.get("/seasons")
+def list_seasons() -> dict:
+    return {"fastf1_available": fastf1_available(), "seasons": _disc_seasons()}
+
+
+@router.get("/sessions")
+def list_sessions(season: int, race: str) -> dict:
+    try:
+        return _disc_sessions(season, race)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SeasonUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @router.get("/races")
-def list_races() -> dict:
+def list_races(season: Optional[int] = None) -> dict:
+    if season is not None:
+        try:
+            return {"fastf1_available": fastf1_available(), "season": season, "races": _disc_races(season)}
+        except SeasonUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
     return {
         "fastf1_available": fastf1_available(),
+        "note": "featured races. Add ?season=YYYY to browse the full FastF1 schedule.",
         "races": [
             {
                 "key": r.key, "name": r.name, "circuit": r.circuit, "year": r.year,
@@ -65,7 +97,10 @@ def historical_replay(req: HistoricalReplayRequest) -> dict:
             race_key=req.race, driver=req.driver, rival=req.rival,
             start_lap=req.start_lap, end_lap=req.end_lap, seed=req.seed,
             dynamic_rival=req.dynamic_rival,
+            season=req.season, event=req.event, session=req.session,
         )
+    except SeasonUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except FastF1Unavailable as exc:

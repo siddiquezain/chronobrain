@@ -176,7 +176,28 @@ The **first** call for a session downloads ~30 MB to `.fastf1_cache/` (needs
 network, ~15–60 s). Every call after that is offline and deterministic. If
 `fastf1` is missing or the download fails → HTTP `503` with a clear message.
 
-## Adding another race
+## Race library — Season → Grand Prix → Session
 
-Add an entry to `app/replay/races.py::HISTORICAL_RACES` (`year`, `event` string
-FastF1 accepts, `scheduled_laps`, default driver/rival). Nothing else changes.
+Two layers:
+
+* **Curated** (`app/replay/races.py::HISTORICAL_RACES`) — the featured races, each
+  with a default driver/rival and a note. `GET /api/v1/replay/races` (no args).
+* **Discovery** (`app/replay/discovery.py`) — any telemetry-supported race in the
+  **2019–2025** window, straight from `fastf1.get_event_schedule`:
+
+  ```
+  GET /api/v1/replay/seasons
+  GET /api/v1/replay/races?season=2023
+  GET /api/v1/replay/sessions?season=2023&race=Italian Grand Prix
+  POST /api/v1/replay/historical  { "season": 2023, "event": "Italian Grand Prix",
+                                    "session": "R", "driver": "VER", "rival": "SAI" }
+  ```
+
+  `event` accepts a Grand Prix name (loose match) or a round number. Unknown /
+  pre-telemetry season → `503`; unknown event/session → `404`; a non-registry
+  race with no `driver` → `422`. Schedules are cached per season in-process; a
+  cached race needs no network.
+
+To add a **featured** race, add a `HISTORICAL_RACES` entry (`year`, `event`
+string FastF1 accepts, `scheduled_laps`, default driver/rival). Nothing else
+changes.

@@ -26,6 +26,14 @@ from app.replay.strategic_rival import (
     select_strategic_rival,
 )
 from app.replay.field_state import FieldTimeline, TickSelection, select_over_ticks
+from app.replay.discovery import (
+    SUPPORTED_SEASONS,
+    SeasonUnavailable,
+    list_races,
+    list_seasons,
+    list_sessions,
+    resolve_session,
+)
 
 __all__ = [
     "HISTORICAL_RACES",
@@ -42,4 +50,10 @@ __all__ = [
     "FieldTimeline",
     "TickSelection",
     "select_over_ticks",
+    "SUPPORTED_SEASONS",
+    "SeasonUnavailable",
+    "list_seasons",
+    "list_races",
+    "list_sessions",
+    "resolve_session",
 ]

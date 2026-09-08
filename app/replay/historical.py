@@ -16,13 +16,49 @@ from app.data.fastf1_service import FastF1Unavailable, load_replay
 from app.data.providers import ReplayProvider
 from app.data.samples import NormalizedLap
 from app.decision import DecisionConfig, DecisionSnapshot, run_decision
-from app.replay.races import HistoricalRace, resolve_race
+from app.replay.races import HISTORICAL_RACES, HistoricalRace, resolve_race
 
 _DEFAULT_CACHE = ".fastf1_cache"
 
 # In-process cache of the *parsed* session (FastF1 caches the raw download itself).
 # Keyed so different driver pairings / races don't collide.
 _SESSION_CACHE: Dict[Tuple[str, str, str], List[NormalizedLap]] = {}
+
+
+def resolve_any_race(
+    race_key: Optional[str] = None,
+    *,
+    season: Optional[int] = None,
+    event: Optional[str] = None,
+    session: Optional[str] = None,
+    driver: Optional[str] = None,
+    rival: Optional[str] = None,
+) -> HistoricalRace:
+    """A curated registry key, OR an on-the-fly race from FastF1's schedule
+    (`season` + `event`). Featured races keep their default driver/rival + note;
+    ad-hoc races need `driver` supplied by the caller."""
+    if race_key and str(race_key).strip().lower() in HISTORICAL_RACES:
+        return resolve_race(race_key)
+    if season is None:
+        raise KeyError(
+            f"unknown race {race_key!r}; pass a known key ({sorted(HISTORICAL_RACES)}) "
+            f"or a `season` + `event` from GET /api/v1/replay/races?season=..."
+        )
+    from app.replay.discovery import resolve_session
+    ev_name = event or race_key
+    if not ev_name:
+        raise KeyError("a non-registry race needs an `event` (name or round number)")
+    info = resolve_session(int(season), str(ev_name), session or "R")
+    if not driver:
+        raise ValueError("a non-registry race needs `driver` (3-letter code)")
+    return HistoricalRace(
+        key=f"{season}_{info['event'].lower().replace(' ', '_')}_{info['session'].lower()}",
+        name=info["name"], circuit=info["circuit"], year=info["year"],
+        event=info["event"], session=info["session"],
+        scheduled_laps=info["scheduled_laps"] or 0,
+        default_driver=(driver or "").upper(), default_rival=(rival or "").upper(),
+        note="ad-hoc replay from the FastF1 schedule",
+    )
 
 
 def session_cache_key(race_key: str, driver: str, rival: str, dynamic_rival: bool) -> Tuple:
@@ -178,7 +214,7 @@ def _censored_provider(full: List[NormalizedLap], upto_lap: int, race_name: str)
 
 def run_historical_lap(
     *,
-    race_key: str,
+    race_key: Optional[str] = None,
     driver: Optional[str] = None,
     rival: Optional[str] = None,
     lap: int,
@@ -186,8 +222,11 @@ def run_historical_lap(
     cache_dir: str = _DEFAULT_CACHE,
     full_snapshot: bool = False,
     dynamic_rival: bool = True,
+    season: Optional[int] = None,
+    event: Optional[str] = None,
+    session: Optional[str] = None,
 ) -> dict:
-    race = resolve_race(race_key)
+    race = resolve_any_race(race_key, season=season, event=event, session=session, driver=driver, rival=rival)
     drv = (driver or race.default_driver).upper()
     riv = (rival or race.default_rival).upper()
     full = _load_race_laps(race, drv, riv, cache_dir, dynamic_rival)
@@ -217,6 +256,9 @@ def strategic_rival_timeline(
     rival: Optional[str] = None,
     cache_dir: str = _DEFAULT_CACHE,
     max_ticks: int = 400,
+    season: Optional[int] = None,
+    event: Optional[str] = None,
+    session: Optional[str] = None,
 ) -> dict:
     """The telemetry-tick strategic-rival stream for ONE lap — the detailed view
     behind the compact per-lap summary (spec §14: heavy detail only on request).
@@ -224,7 +266,7 @@ def strategic_rival_timeline(
     Causal: each tick's pick depends only on data <= that tick, so slicing the
     race-wide selection to this lap is identical to having stopped at this lap.
     """
-    race = resolve_race(race_key)
+    race = resolve_any_race(race_key, season=season, event=event, session=session, driver=driver, rival=rival)
     drv = (driver or race.default_driver).upper()
     riv = (rival or race.default_rival).upper()
 
@@ -292,8 +334,11 @@ def run_historical_replay(
     seed: int = 42,
     cache_dir: str = _DEFAULT_CACHE,
     dynamic_rival: bool = True,
+    season: Optional[int] = None,
+    event: Optional[str] = None,
+    session: Optional[str] = None,
 ) -> dict:
-    race = resolve_race(race_key)
+    race = resolve_any_race(race_key, season=season, event=event, session=session, driver=driver, rival=rival)
     drv = (driver or race.default_driver).upper()
     riv = (rival or race.default_rival).upper()
     full = _load_race_laps(race, drv, riv, cache_dir, dynamic_rival)

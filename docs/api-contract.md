@@ -160,14 +160,31 @@ pipeline. No hindsight, no ground truth (F1 publishes no rival ERS SoC — Chron
 downloads to `.fastf1_cache/`, later calls are offline.
 
 ```
-GET  /api/v1/replay/races
-  -> { "fastf1_available": true,
+GET  /api/v1/replay/races                     // no args -> curated featured races
+  -> { "fastf1_available": true, "note": "...",
        "races": [ { key, name, circuit, year, session, scheduled_laps,
                     default_driver, default_rival, note } ] }
+
+GET  /api/v1/replay/seasons                   // discovery: what FastF1 can give us
+  -> { "fastf1_available": true,
+       "seasons": [ { season, available, rounds } ] }        // 2019..2026
+
+GET  /api/v1/replay/races?season=2023
+  -> { "fastf1_available", "season", "races": [ { round, event, name,
+       official_name, country, location, event_date, format,
+       telemetry_supported, sessions: ["FP1",...,"Q","R"] } ] }
+
+GET  /api/v1/replay/sessions?season=2023&race=Italian Grand Prix
+  -> { season, round, event, name, circuit, country, telemetry_supported,
+       sessions: [ { name, code, date_utc } ] }
+     // 503 pre-telemetry season, 404 unknown event
 
 POST /api/v1/replay/historical
 { "race": "2024_italian_gp", "driver": "LEC", "rival": "PIA",   // rival = focus/fallback
   "start_lap": 1, "end_lap": 53, "seed": 42, "dynamic_rival": true }
+// OR an ad-hoc race from the schedule (instead of `race`):
+// { "season": 2023, "event": "Italian Grand Prix", "session": "R",
+//   "driver": "VER", "rival": "SAI" }
   -> {
        "race": { key, name, circuit, year, session, scheduled_laps,
                  laps_with_telemetry, driver, rival, note },
