@@ -180,50 +180,69 @@ def _run_window(ctx: DecisionContext) -> None:
     ctx.window = compute_window(ctx.lap_history, window=ctx.config.window_laps)
 
 
+def _driver_seed_offset(driver: str) -> int:
+    """Deterministic, process-independent per-driver seed offset — so two tracked
+    rivals get distinct particle clouds without any RNG salt."""
+    import zlib
+    return int(zlib.adler32(driver.encode("utf-8")) % 100_000)
+
+
 def _thread_state(ctx: DecisionContext) -> None:
     """
     Walk laps 1..N. `overtake_bonus_banked` for lap N is set by lap N-1's gate
-    (qualification is a telemetry fact, not a mode choice). The rival particle
-    filter is advanced once per lap with that lap's observation when present.
+    (qualification is a telemetry fact, not a mode choice).
+
+    IDENTITY-AWARE rival energy: one particle filter PER tracked driver. Each
+    filter only ever sees that driver's own observations, in lap order, censored
+    to laps <= N. When the strategic rival switches away and later comes back, its
+    filter *resumes* from where it left off (we do have prior evidence about a car
+    we watched before) — it is not restarted from scratch, and it never sees
+    another driver's observations. Synthetic / fixed two-car replay carry
+    `strategic_rival=None` and use a single default filter, exactly as before.
     """
     cfg = ctx.config
     gate = RegulatoryGate(config=cfg.gate_config())
-    estimator = RivalStateEstimator(config=cfg.rival_config(), seed=cfg.seed)
+
+    default_est = RivalStateEstimator(config=cfg.rival_config(), seed=cfg.seed)
+    estimators: dict[str, RivalStateEstimator] = {}
+
+    def _est_for(driver: Optional[str]) -> RivalStateEstimator:
+        if driver is None:
+            return default_est
+        if driver not in estimators:
+            estimators[driver] = RivalStateEstimator(
+                config=cfg.rival_config(), seed=cfg.seed + _driver_seed_offset(driver)
+            )
+        return estimators[driver]
 
     banked = False
-    prev_rival_id: Optional[str] = None
+    current_est = default_est
     for i, nl in enumerate(ctx.lap_history):
         ti = to_telemetry_input(nl, overtake_qualified_last_lap=banked)
         gr = gate.evaluate(ti)
 
-        # Dynamic strategic rival: when the tracked opponent changes identity, the
-        # particle filter's posterior is about a DIFFERENT car — reset it to the
-        # prior so the new rival's energy is estimated fresh (honest: we have no
-        # prior information about a car we just started watching). Synthetic / fixed
-        # two-car replay carry strategic_rival=None -> this never fires.
         rival_id = nl.strategic_rival.driver if nl.strategic_rival is not None else None
-        if rival_id is not None and prev_rival_id is not None and rival_id != prev_rival_id:
-            estimator = RivalStateEstimator(config=cfg.rival_config(), seed=cfg.seed)
-        if rival_id is not None:
-            prev_rival_id = rival_id
+        est = _est_for(rival_id)
 
         obs = to_rival_observation(nl)
         if obs is not None:
-            estimator.predict()
-            estimator.update(obs)
-        elif estimator.observation_count > 0:
+            est.predict()
+            est.update(obs)
+        elif est.observation_count > 0:
             # rival lap was pit / out / invalid — a lap passed but there is no
             # clean observation. Advance the drift (uncertainty grows) but do NOT
             # update: a +20 s pit-lap delta must never collapse the posterior.
-            estimator.predict()
+            est.predict()
+        current_est = est
 
         if i == len(ctx.lap_history) - 1:
             ctx.overtake_bonus_banked = banked
             ctx.gate_result = gr  # provisional; re-evaluated in _run_gate for clarity
         banked = gr.qualifies_for_overtake_bonus_next_lap
 
-    ctx._estimator = estimator
-    ctx.rival = _rival_features(ctx, estimator)
+    ctx._estimator = current_est
+    ctx._estimators = estimators
+    ctx.rival = _rival_features(ctx, current_est)
 
 
 def _rival_features(ctx: DecisionContext, estimator: RivalStateEstimator) -> Optional[RivalFeatures]:

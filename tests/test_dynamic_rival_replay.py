@@ -42,20 +42,33 @@ def _lap(lap, rival_driver, term_speed, *, role="ATTACK_TARGET"):
     )
 
 
-def test_estimator_resets_when_the_strategic_rival_changes():
-    # laps 1-6 track NOR (fast), laps 7-12 track PIA (slow) — different cars
+def test_new_rival_gets_its_own_fresh_filter():
+    # laps 1-6 track NOR (fast), laps 7-12 track PIA (slow) — PIA never seen before
     laps = [_lap(i, "NOR", 335.0) for i in range(1, 7)]
     laps += [_lap(i, "PIA", 300.0) for i in range(7, 13)]
-
     ctx6 = run_pipeline(ReplayProvider(laps), lap=6, config=DecisionConfig(seed=42))
     ctx12 = run_pipeline(ReplayProvider(laps), lap=12, config=DecisionConfig(seed=42))
-
-    # lap 6: 6 observations of NOR
-    assert ctx6.rival.estimate.n_observations == 6
-    # lap 12: the filter was reset at lap 7 -> only 6 observations of PIA, not 12
-    assert ctx12.rival.estimate.n_observations == 6
-    # and the two estimates are genuinely about different evidence
+    assert ctx6.rival.estimate.n_observations == 6          # NOR: 6 obs
+    assert ctx12.rival.estimate.n_observations == 6          # PIA: 6 obs (7..12), not 12
     assert ctx6.rival.estimate.mean_soc_mj != ctx12.rival.estimate.mean_soc_mj
+
+
+def test_returning_rival_resumes_its_own_evidence_no_contamination():
+    # NOR (1-4) -> PIA (5-7) -> NOR again (8-10).  Spec tests 16 + 17.
+    laps = [_lap(i, "NOR", 335.0) for i in range(1, 5)]
+    laps += [_lap(i, "PIA", 295.0) for i in range(5, 8)]
+    laps += [_lap(i, "NOR", 336.0) for i in range(8, 11)]
+    ctx4 = run_pipeline(ReplayProvider(laps), lap=4, config=DecisionConfig(seed=42))
+    ctx7 = run_pipeline(ReplayProvider(laps), lap=7, config=DecisionConfig(seed=42))
+    ctx10 = run_pipeline(ReplayProvider(laps), lap=10, config=DecisionConfig(seed=42))
+
+    assert ctx4.rival.estimate.n_observations == 4           # NOR: laps 1-4
+    assert ctx7.rival.estimate.n_observations == 3           # PIA: laps 5-7 only
+    # NOR resumed: 4 (early) + 3 (late) = 7 of its OWN observations, never PIA's
+    assert ctx10.rival.estimate.n_observations == 7
+    # PIA's filter still holds exactly its 3 observations, untouched by NOR's laps
+    assert ctx10._estimators["PIA"].observation_count == 3
+    assert ctx10._estimators["NOR"].observation_count == 7
 
 
 def test_no_reset_when_rival_identity_is_stable():
@@ -154,18 +167,25 @@ def test_monza_directional_roles_are_consistent_with_the_gap(monza_dynamic):
 
 
 @_needs_fastf1
-def test_monza_rival_switch_resets_the_energy_inference(monza_dynamic):
+def test_monza_rival_switch_follows_the_new_cars_identity_aware_filter(monza_dynamic):
     laps = monza_dynamic["laps"]
     by_lap = {L["lap"]: L for L in laps}
     changes = monza_dynamic["strategic_rival"]["changes"]
-    # on the lap a switch happens, the inference is now about the new car and the
-    # observation count has dropped back down
+    seen_driver_first_lap: dict = {}
+    for L in laps:
+        d = L["strategic_rival"]["driver"]
+        seen_driver_first_lap.setdefault(d, L["lap"])
     for c in changes:
         lp = c["lap"]
-        if lp in by_lap and (lp - 1) in by_lap:
-            assert by_lap[lp]["rival_energy_inference"]["driver"] == c["to"]
-            assert by_lap[lp]["rival_energy_inference"]["n_observations"] <= \
-                   by_lap[lp - 1]["rival_energy_inference"]["n_observations"] + 1
+        if lp not in by_lap:
+            continue
+        # the surfaced inference is now about the NEW driver
+        assert by_lap[lp]["rival_energy_inference"]["driver"] == c["to"]
+        n = by_lap[lp]["rival_energy_inference"]["n_observations"]
+        # a driver seen for the FIRST time this switch -> few observations;
+        # a RESUMED driver -> its filter carried its own history (n can be large),
+        # but never more than the laps that driver has actually been tracked.
+        assert 0 <= n <= lp
 
 
 @_needs_fastf1

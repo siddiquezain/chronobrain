@@ -45,11 +45,54 @@ for lap N has `lap_list == [1..N]`) and
 `test_future_telemetry_cannot_change_a_lap_n_decision` (corrupt every lap > 8 with
 wild values → the Lap 8 decision is byte-identical).
 
-## Dynamic strategic-rival selection
+## Dynamic strategic-rival selection — telemetry-tick cadence
 
-A real race is not a permanent two-car duel. `POST /api/v1/replay/historical`
-(`dynamic_rival: true`, the default) re-selects the opponent that matters **every
-lap**, from the whole field, using only data up to that lap:
+A real race is not a permanent two-car duel, and the fight can change between
+corners. `POST /api/v1/replay/historical` (`dynamic_rival: true`, the default)
+re-selects the opponent that matters at **every FastF1 telemetry tick** (the
+provider's real cadence — ~4 Hz / ~330 samples per lap on 2024 data, **not** 1 ms),
+from the whole field, using only data up to that tick.
+
+```
+session (all drivers' car_data, already parsed)
+  -> app.replay.field_state.FieldTimeline.build(session, our_driver)   [cached per session]
+       (T, D) matrices: race-progress / speed / running-position / lap-status,
+       every channel sampled onto our tick grid with a strict previous-value hold
+  -> vectorised relevance = strategic_rival.score_matrix(...)   (locked to _score_candidate)
+  -> tick pick + hysteresis (switch_margin 0.10, min_dwell_ticks 12)  -> TickSelection[]
+  -> per-lap dominant rival by time-share   ==  the value on NormalizedLap.strategic_rival
+```
+
+* **Lap-cadence decisions, tick-cadence rival.** The heavy pipeline (energy
+  inference, Monte Carlo, gates, decision) still runs once per lap, on the
+  **dominant** tick-level rival for that lap. The full sub-lap stream is exposed
+  separately: `GET /api/v1/replay/historical/{race}/{lap}/timeline`.
+* The lap value is a **summary** of the ticks, not an independently computed
+  rival: `strategic_rival.changes_this_lap`, `.tick_share`, `.tick_level`.
+* **Hysteresis.** A challenger must beat the incumbent's *live* score by
+  `switch_margin` **and** the incumbent must have been held `min_dwell_ticks`
+  (~3 s) — so two cars at a near-identical gap don't trade the title on
+  reconstruction noise. The tick-level closing-rate signal is hard-clamped below
+  the switch margin (public data can't resolve a 0.2 s closing rate).
+* **Direction** (ahead/behind) is the official per-lap running position held
+  forward — public GPS does not resolve a 0.2 s side-by-side. An overtake flips
+  the role at the lap the position table updates (≤ ~1 lap latency); a genuine
+  sub-second side-by-side reads as `POSITION_BATTLE`.
+* **Identity-aware energy.** One particle filter **per tracked driver**. Each sees
+  only that driver's own observations; a returning rival *resumes* its filter, and
+  no filter is ever fed another driver's data.
+* **No hindsight.** `FieldTimeline` samples are previous-value-hold only; track
+  length and reference lap time come from laps ≤ 6 (circuit constants). Corrupting
+  any telemetry after tick *t* leaves every selection at *t* byte-identical
+  (`tests/test_tick_rival_replay.py::test_future_telemetry_cannot_change_tick_selection`).
+
+### Lap-level (fallback)
+
+When per-tick telemetry is unavailable the lap-level selector
+(`strategic_rival.build_strategic_rivals`, `strategic_rival: {tick_level: false}`)
+is used instead — same scoring model over per-lap position / gap / trend / pace.
+
+### (the lap-level path in detail)
 
 ```
 full field (all drivers' position / gap / trend / pace / pit status, <= lap N)

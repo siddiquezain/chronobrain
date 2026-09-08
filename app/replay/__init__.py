@@ -13,13 +13,19 @@ the synthetic and demo paths do. No second decision engine, no hindsight.
 """
 
 from app.replay.races import HISTORICAL_RACES, HistoricalRace, resolve_race
-from app.replay.historical import run_historical_replay, run_historical_lap
+from app.replay.historical import (
+    run_historical_lap,
+    run_historical_replay,
+    strategic_rival_timeline,
+)
 from app.replay.strategic_rival import (
     RivalSelectorConfig,
     StrategicRival,
     build_strategic_rivals,
+    score_matrix,
     select_strategic_rival,
 )
+from app.replay.field_state import FieldTimeline, TickSelection, select_over_ticks
 
 __all__ = [
     "HISTORICAL_RACES",
@@ -27,8 +33,13 @@ __all__ = [
     "resolve_race",
     "run_historical_replay",
     "run_historical_lap",
+    "strategic_rival_timeline",
     "RivalSelectorConfig",
     "StrategicRival",
     "build_strategic_rivals",
     "select_strategic_rival",
+    "score_matrix",
+    "FieldTimeline",
+    "TickSelection",
+    "select_over_ticks",
 ]

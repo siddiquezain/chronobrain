@@ -110,10 +110,23 @@ class RivalSelectorConfig:
     # Defaults to the 2026 overtake-proximity rule so the two never drift apart.
     immediate_range_s: float = field(default_factory=lambda: GateConfig().overtake_detection_gap_threshold_s)
 
+    # --- tick-level switching stability (hysteresis) -----------------------
+    # A challenger must beat the *current* incumbent's live score by this margin
+    # (in relevance units, 0..1) before the tracked rival switches. Prevents
+    # PIA->NOR->PIA chatter from sub-noise score differences. MODEL_ASSUMPTION.
+    switch_margin: float = 0.10
+    # ...and the incumbent must have been held at least this many ticks before any
+    # switch is allowed (~3 s at FastF1's ~4 Hz — a strategic rival should not flip
+    # faster than a driver could react to it, and two cars at a near-identical gap
+    # must not trade the title on reconstruction noise). MODEL_ASSUMPTION.
+    min_dwell_ticks: int = 12
+
     def __post_init__(self) -> None:
         total = self.w_proximity + self.w_adjacency + self.w_gap_trend + self.w_pace + self.w_directional
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"RivalSelectorConfig weights must sum to 1.0 (got {total})")
+        if self.switch_margin < 0 or self.min_dwell_ticks < 0:
+            raise ValueError("switch_margin and min_dwell_ticks must be >= 0")
 
 
 _DEFAULT_CONFIG = RivalSelectorConfig()
@@ -184,6 +197,62 @@ def _score_candidate(c: RivalCandidate, cfg: RivalSelectorConfig) -> Dict[str, f
         "damping": round(damping, 4),
         "relevance": round(_clamp01(raw) * damping, 4),
     }
+
+
+def score_matrix(
+    *,
+    gap_s,
+    ahead,
+    gap_trend,
+    pace_delta,
+    positions_apart,
+    status_code,
+    cfg: Optional[RivalSelectorConfig] = None,
+):
+    """Vectorised twin of `_score_candidate`'s `relevance` output, over (T, D)
+    arrays. Element-for-element identical to calling `_score_candidate` per cell
+    (locked by test_strategic_rival.test_score_matrix_matches_scalar). `status_code`
+    is 0 for 'racing', non-zero otherwise. NaN inputs mean "unknown" exactly as in
+    the scalar path.
+
+    This is NOT a re-derivation of the scoring model — it is the same formula,
+    kept next to the scalar version so the tick-level path stays fast without a
+    second source of truth.
+    """
+    import numpy as np
+
+    cfg = cfg or _DEFAULT_CONFIG
+    gap_s = np.asarray(gap_s, dtype=float)
+    ahead = np.asarray(ahead, dtype=float)          # 1.0 ahead, 0.0 behind, NaN unknown
+    gap_trend = np.asarray(gap_trend, dtype=float)
+    pace_delta = np.asarray(pace_delta, dtype=float)
+    apart = np.asarray(positions_apart, dtype=float)
+    status_code = np.asarray(status_code)
+
+    proximity = np.where(np.isnan(gap_s), 0.0, np.clip(1.0 - gap_s / cfg.strategic_gap_ceiling_s, 0.0, 1.0))
+
+    adjacency = np.select(
+        [np.isnan(apart), apart <= 1, apart == 2, apart == 3],
+        [0.0, 1.0, 0.5, 0.2],
+        default=0.0,
+    )
+
+    gap_tr = np.where(np.isnan(gap_trend), 0.0,
+                      np.clip(-gap_trend / cfg.gap_trend_ref_s_per_lap, 0.0, 1.0))
+
+    pace = np.where(np.isnan(pace_delta), 0.5,
+                    np.clip(1.0 - np.abs(pace_delta) / cfg.pace_ref_s, 0.0, 1.0))
+
+    directional = np.where(np.isnan(ahead), 0.3, 1.0)
+
+    raw = (cfg.w_proximity * proximity + cfg.w_adjacency * adjacency
+           + cfg.w_gap_trend * gap_tr + cfg.w_pace * pace + cfg.w_directional * directional)
+
+    damping = np.ones_like(raw, dtype=float)
+    damping = np.where(status_code != 0, damping * cfg.non_racing_damping, damping)
+    damping = np.where(~np.isnan(gap_s) & (gap_s > cfg.strategic_gap_ceiling_s), damping * 0.1, damping)
+
+    return np.round(np.clip(raw, 0.0, 1.0) * damping, 4)
 
 
 def _role_for(c: RivalCandidate, relevance: float, cfg: RivalSelectorConfig) -> Role:

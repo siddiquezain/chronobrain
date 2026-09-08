@@ -16,7 +16,7 @@ internals.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -74,6 +74,16 @@ class StrategicRivalInfo(BaseModel):
     gap_s: Optional[float] = Field(None, ge=0.0, description="Unsigned gap magnitude")
     ahead: Optional[bool] = Field(None, description="True = rival ahead of us, False = behind")
     relevance_score: float = Field(0.0, ge=0.0, le=1.0)
+
+    # --- tick-level provenance (additive; set only when the replay had telemetry
+    #     at tick cadence — the lap value above is then a SUMMARY of the ticks) ---
+    tick_level: bool = Field(
+        False, description="True when this lap's rival was derived from telemetry-tick selection"
+    )
+    changes_this_lap: int = Field(0, ge=0, description="Number of strategic-rival switches during this lap")
+    tick_share: Dict[str, float] = Field(
+        default_factory=dict, description="Fraction of the lap each opponent was the strategic rival"
+    )
 
 
 class NormalizedLap(BaseModel):

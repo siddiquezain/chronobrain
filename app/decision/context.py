@@ -84,7 +84,8 @@ class DecisionContext:
     # instances retained for diagnostics: the confidence gate pulls raw MC samples
     # from the planner; the demo/validation layer reads the estimator's posterior.
     _planner: object = None
-    _estimator: object = None
+    _estimator: object = None                    # the CURRENT rival's filter
+    _estimators: object = None                   # {driver: filter} — identity-aware bank
 
     # fusion outputs
     final_mode: Optional[str] = None

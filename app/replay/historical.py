@@ -89,6 +89,10 @@ def lap_summary(snap: DecisionSnapshot, nl: Optional[NormalizedLap] = None) -> d
             "gap_s": r.strategic_gap_s,
             "ahead": r.strategic_rival_ahead,
             "relevance_score": r.relevance_score,
+            "tick_level": (nl.strategic_rival.tick_level if nl is not None and nl.strategic_rival else False),
+            "changes_this_lap": (nl.strategic_rival.changes_this_lap if nl is not None and nl.strategic_rival else 0),
+            "tick_share": (dict(list((nl.strategic_rival.tick_share or {}).items())[:4])
+                           if nl is not None and nl.strategic_rival else {}),
         },
         "rival_energy_inference": {   # inferred from observable performance — NOT measured
             "label": "RIVAL ENERGY INFERENCE (probabilistic, from observable performance)",
@@ -205,6 +209,79 @@ def run_historical_lap(
     return out
 
 
+def strategic_rival_timeline(
+    *,
+    race_key: str,
+    lap: int,
+    driver: Optional[str] = None,
+    rival: Optional[str] = None,
+    cache_dir: str = _DEFAULT_CACHE,
+    max_ticks: int = 400,
+) -> dict:
+    """The telemetry-tick strategic-rival stream for ONE lap — the detailed view
+    behind the compact per-lap summary (spec §14: heavy detail only on request).
+
+    Causal: each tick's pick depends only on data <= that tick, so slicing the
+    race-wide selection to this lap is identical to having stopped at this lap.
+    """
+    race = resolve_race(race_key)
+    drv = (driver or race.default_driver).upper()
+    riv = (rival or race.default_rival).upper()
+
+    # ensure the dynamic replay (and thus the FieldTimeline) is built + cached
+    _load_race_laps(race, drv, riv, cache_dir, dynamic_rival=True)
+
+    from app.data.fastf1_service import field_timeline_cache_key, get_cached_field_timeline
+    ft = get_cached_field_timeline(field_timeline_cache_key(race.year, race.event, race.session, drv))
+    if ft is None:
+        raise FastF1Unavailable(
+            "no telemetry-tick reconstruction available for this replay "
+            "(the lap-level selector was used) — no tick timeline to show"
+        )
+
+    tl = ft.selection_timeline()
+    summaries = ft.lap_summaries(timeline=tl)
+    lap_ticks = [s for s in tl if s.lap == lap]
+    if not lap_ticks:
+        raise ValueError(f"lap {lap} has no telemetry ticks in this replay")
+
+    step = max(1, len(lap_ticks) // max_ticks)
+    sampled = lap_ticks[::step]
+    s = summaries.get(lap)
+    t0 = lap_ticks[0].t
+    return {
+        "race": _race_meta(race, drv, riv, len({x.lap for x in tl})),
+        "lap": lap,
+        "our_driver": drv,
+        "focus_rival": riv,
+        "tick_cadence_hz": round(len(lap_ticks) / max(lap_ticks[-1].t - t0, 1e-6), 1),
+        "total_ticks_this_lap": len(lap_ticks),
+        "returned_ticks": len(sampled),
+        "downsample_step": step,
+        "summary": None if s is None else {
+            "dominant_driver": s.dominant_driver, "dominant_role": s.dominant_role,
+            "dominant_ahead": s.dominant_ahead, "dominant_gap_s": s.dominant_gap_s,
+            "first_driver": s.first_driver, "last_driver": s.last_driver,
+            "n_changes": s.n_changes, "share_by_driver": s.share_by_driver,
+        },
+        "change_events": s.change_events if s is not None else [],
+        "ticks": [
+            {
+                "t": round(x.t - t0, 3), "session_time_s": round(x.t, 3),
+                "driver": x.driver, "role": x.role, "ahead": x.ahead,
+                "gap_s": x.gap_s, "relevance": x.relevance_score,
+                "switched": x.switched, "raw_leader": x.raw_leader,
+            }
+            for x in sampled
+        ],
+        "provenance": {
+            "REAL": "FastF1 per-driver car telemetry (SessionTime, speed) + official running position",
+            "MODELED": "which opponent is 'strategically relevant' at each tick — deterministic score "
+                       "over reconstructed track gap / adjacency / closing rate / pace (MODEL_ASSUMPTION)",
+        },
+    }
+
+
 def run_historical_replay(
     *,
     race_key: str,
@@ -235,6 +312,10 @@ def run_historical_replay(
         laps_out.append(lap_summary(snap, by_lap[n]))
 
     changes = _strategic_rival_changes(full, start, end)
+    tick_level = any(nl.strategic_rival and nl.strategic_rival.tick_level for nl in full)
+    intra = sum(nl.strategic_rival.changes_this_lap for nl in full
+                if nl.strategic_rival and start <= nl.lap <= end)
+    n_replayed = max(1, end - start + 1)
 
     return {
         "race": _race_meta(race, drv, riv, len(available)),
@@ -246,19 +327,28 @@ def run_historical_replay(
         "model": "chronopace_2026",
         "strategic_rival": {
             "dynamic": dynamic_rival,
+            "tick_level": tick_level,
             "focus_rival": riv,
-            "selector": "app.replay.strategic_rival (deterministic, causal)",
+            "selector": "app.replay.field_state + app.replay.strategic_rival (deterministic, causal)",
             "note": (
+                "The strategic rival is chosen at every FastF1 telemetry tick from the "
+                "whole field, using only data <= that tick; the per-lap value is the "
+                "dominant rival by time-share. 'focus_rival' is the fallback."
+                if tick_level else
                 "The rival is re-selected from the full field every lap using only data "
                 "<= that lap. 'focus_rival' is the fallback when no opponent is relevant."
                 if dynamic_rival else
                 "Fixed two-car analysis: the rival is the configured driver every lap."
             ),
-            "changes": changes,
+            "changes": changes,   # lap-boundary identity changes (kept for compatibility)
+            "lap_boundary_changes": changes,
+            "intra_lap_changes_total": intra,
+            "avg_switches_per_lap": round((len(changes) + intra) / n_replayed, 2),
             "drivers_tracked": sorted({
                 nl.strategic_rival.driver for nl in full
                 if nl.strategic_rival is not None and nl.strategic_rival.driver
             }),
+            "timeline_endpoint": f"GET /api/v1/replay/historical/{race.key}/{{lap}}/timeline",
         },
         "provenance": {
             "REAL": [

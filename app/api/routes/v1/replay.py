@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.data.fastf1_service import FastF1Unavailable, fastf1_available
 from app.replay import HISTORICAL_RACES, run_historical_lap, run_historical_replay
+from app.replay.historical import strategic_rival_timeline
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/replay", tags=["replay"])
@@ -95,3 +96,26 @@ def historical_lap(
     except Exception as exc:  # noqa: BLE001
         logger.exception("historical lap replay failed")
         raise HTTPException(500, f"replay error: {exc}") from exc
+
+
+@router.get("/historical/{race}/{lap}/timeline")
+def historical_lap_timeline(
+    race: str, lap: int, driver: Optional[str] = None, rival: Optional[str] = None,
+    max_ticks: int = 400,
+) -> dict:
+    """Telemetry-tick strategic-rival stream for one lap (the detail behind the
+    compact per-lap summary). Sub-lap rival changes are real selector output, not
+    a cosmetic timeline."""
+    try:
+        return strategic_rival_timeline(
+            race_key=race, lap=lap, driver=driver, rival=rival, max_ticks=max_ticks,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except FastF1Unavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("historical timeline failed")
+        raise HTTPException(500, f"timeline error: {exc}") from exc

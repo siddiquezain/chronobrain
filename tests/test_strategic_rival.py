@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import pytest
 
+import numpy as np
+
 from app.replay.strategic_rival import (
     LapFieldEntry,
     RivalCandidate,
     RivalSelectorConfig,
+    _score_candidate,
     build_candidate,
     build_strategic_rivals,
+    score_matrix,
     select_strategic_rival,
 )
 
@@ -212,3 +216,35 @@ def test_weights_must_sum_to_one():
 def test_build_candidate_returns_none_when_opponent_absent_on_lap():
     field = _field({"LEC": [(1, 2, 90.0)], "NOR": [(2, 3, 175.0)]})
     assert build_candidate(field, "LEC", "NOR", 1) is None
+
+
+# ---------------------------------------------------------------------------
+# score_matrix is a LOCKED vectorised twin of _score_candidate (same formula)
+# ---------------------------------------------------------------------------
+def test_score_matrix_matches_scalar():
+    rng = np.random.default_rng(7)
+    cfg = RivalSelectorConfig()
+    N = 4000
+    gap = np.where(rng.random(N) < 0.1, np.nan, rng.uniform(0, 15, N))
+    ahead = np.where(rng.random(N) < 0.15, np.nan, (rng.random(N) > 0.5).astype(float))
+    trend = np.where(rng.random(N) < 0.2, np.nan, rng.uniform(-3, 3, N))
+    pace = np.where(rng.random(N) < 0.2, np.nan, rng.uniform(-4, 4, N))
+    apart = np.where(rng.random(N) < 0.1, np.nan, rng.integers(1, 9, N).astype(float))
+    status = rng.integers(0, 4, N)
+    mat = score_matrix(gap_s=gap, ahead=ahead, gap_trend=trend, pace_delta=pace,
+                       positions_apart=apart, status_code=status, cfg=cfg)
+    worst = 0.0
+    for i in range(N):
+        c = RivalCandidate(
+            driver="X", position=1,
+            gap_s=None if np.isnan(gap[i]) else float(gap[i]),
+            ahead=None if np.isnan(ahead[i]) else bool(ahead[i] > 0.5),
+            gap_trend_s_per_lap=None if np.isnan(trend[i]) else float(trend[i]),
+            pace_delta_s=None if np.isnan(pace[i]) else float(pace[i]),
+            positions_apart=None if np.isnan(apart[i]) else int(apart[i]),
+            lap_status="racing" if status[i] == 0 else "pit",
+        )
+        worst = max(worst, abs(_score_candidate(c, cfg)["relevance"] - mat[i]))
+    # both sides round the relevance to 4 dp; a disagreement of one unit in the
+    # last place is float rounding at an exact .5 boundary, not a formula drift.
+    assert worst <= 2e-4, f"vectorised score drifts from scalar by {worst}"

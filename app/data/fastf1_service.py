@@ -18,16 +18,47 @@ historical replay of public data — not a live feed and not team telemetry.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.data.normalizer import ReplayEnergyModel, condense_lap
 from app.data.samples import NormalizedLap, StrategicRivalInfo, TelemetrySample
 
-# NOTE: app.replay.strategic_rival is imported lazily inside load_replay() — it
-# lives under app.replay, whose __init__ imports historical -> fastf1_service, so
-# a module-level import here would be circular.
+# NOTE: app.replay.strategic_rival / app.replay.field_state are imported lazily
+# inside load_replay() — they live under app.replay, whose __init__ imports
+# historical -> fastf1_service, so a module-level import here would be circular.
 
 _DEFAULT_CACHE = ".fastf1_cache"
+
+# In-process cache of the built tick-level FieldTimeline, keyed by
+# (year, event, session, our_driver). Lets the replay response and the
+# /timeline endpoint reuse one reconstruction without re-parsing the session.
+_FIELD_TIMELINE_CACHE: Dict[Tuple, object] = {}
+
+
+def field_timeline_cache_key(year: int, event, session: str, our_driver: str) -> Tuple:
+    return (int(year), str(event), str(session), str(our_driver).upper())
+
+
+def get_cached_field_timeline(key: Tuple):
+    return _FIELD_TIMELINE_CACHE.get(key)
+
+
+def clear_field_timeline_cache() -> None:
+    _FIELD_TIMELINE_CACHE.clear()
+
+
+@dataclass(frozen=True)
+class _RivalPick:
+    driver: str
+    role: str
+    position: Optional[int]
+    gap_s: Optional[float]
+    ahead: Optional[bool]
+    relevance: float
+    tick_level: bool = False
+    changes_this_lap: int = 0
+    tick_share: Optional[dict] = None
 
 
 class FastF1Unavailable(RuntimeError):
@@ -172,7 +203,7 @@ def load_replay(
     if dynamic_rival:
         return _load_replay_dynamic(
             ses, year, ev_name, session, our_driver, rival_driver, laps,
-            scheduled_laps, model, label, selector_config,
+            scheduled_laps, model, label, selector_config, event_key=event,
         )
 
     our_samples = _driver_lap_samples(ses, our_driver)
@@ -262,6 +293,63 @@ def load_replay(
 
 
 # ---------------------------------------------------------------------------
+# strategic-rival selection per lap: telemetry-tick when available, else lap-level
+# ---------------------------------------------------------------------------
+def _pick_rivals_per_lap(
+    ses, our_driver: str, focus_rival: str, our_laps: List[int],
+    field: Dict, selector_config,
+    *, year: int, ev_name, session: str, scheduled_laps: int,
+) -> Dict[int, _RivalPick]:
+    """One strategic-rival pick per lap. Preferred: derive it from the telemetry-
+    tick selection (`FieldTimeline`) — the lap pick is then the SUMMARY of the
+    sub-lap selections. Fallback (no per-tick telemetry): the lap-level selector."""
+    from app.replay.strategic_rival import build_strategic_rivals
+
+    try:
+        from app.replay.field_state import FieldTimeline
+
+        key = field_timeline_cache_key(year, ev_name, session, our_driver)
+        ft = _FIELD_TIMELINE_CACHE.get(key)
+        if ft is None:
+            ft = FieldTimeline.build(ses, our_driver, scheduled_laps=scheduled_laps)
+            _FIELD_TIMELINE_CACHE[key] = ft
+        summaries = ft.lap_summaries(config=selector_config)
+        if summaries:
+            picks: Dict[int, _RivalPick] = {}
+            for ln in our_laps:
+                s = summaries.get(ln)
+                if s is None:
+                    continue
+                picks[ln] = _RivalPick(
+                    driver=s.dominant_driver or focus_rival,
+                    role=s.dominant_role,
+                    position=s.dominant_position,
+                    gap_s=s.dominant_gap_s,
+                    ahead=s.dominant_ahead,
+                    relevance=s.dominant_relevance,
+                    tick_level=True,
+                    changes_this_lap=s.n_changes,
+                    tick_share=s.share_by_driver,
+                )
+            if picks:
+                return picks
+    except Exception:
+        pass  # any reconstruction problem -> fall back to the lap-level selector
+
+    lap_rivals = build_strategic_rivals(
+        field, our_driver, our_laps, config=selector_config, fallback_driver=focus_rival,
+    )
+    return {
+        ln: _RivalPick(
+            driver=sr.driver or focus_rival, role=sr.role, position=sr.position,
+            gap_s=sr.gap_s, ahead=sr.ahead, relevance=sr.relevance_score,
+            tick_level=False, changes_this_lap=0, tick_share={},
+        )
+        for ln, sr in lap_rivals.items()
+    }
+
+
+# ---------------------------------------------------------------------------
 # dynamic strategic-rival path
 # ---------------------------------------------------------------------------
 def _load_replay_dynamic(
@@ -276,6 +364,8 @@ def _load_replay_dynamic(
     model: ReplayEnergyModel,
     label: Optional[str],
     selector_config,
+    *,
+    event_key=None,
 ) -> List[NormalizedLap]:
     # lazy import — app.replay.__init__ -> historical -> fastf1_service is circular
     from app.replay.strategic_rival import LapFieldEntry, build_strategic_rivals
@@ -310,14 +400,15 @@ def _load_replay_dynamic(
         raise FastF1Unavailable(f"no laps for {our_driver!r} to replay")
     total_laps = int(scheduled_laps or getattr(ses, "total_laps", 0) or our_laps[-1])
 
-    rivals_by_lap = build_strategic_rivals(
-        field, our_driver, our_laps,
-        config=selector_config, fallback_driver=focus_rival,
+    picks_by_lap = _pick_rivals_per_lap(
+        ses, our_driver, focus_rival, our_laps, field, selector_config,
+        year=year, ev_name=(event_key if event_key is not None else ev_name),
+        session=session, scheduled_laps=total_laps,
     )
 
     # load per-lap samples only for the drivers actually needed
     needed = {our_driver, focus_rival} | {
-        sr.driver for sr in rivals_by_lap.values() if sr.driver
+        p.driver for p in picks_by_lap.values() if p.driver
     }
     samples_by_driver = {
         d: _driver_lap_samples(ses, d) for d in needed if d in all_drivers
@@ -355,27 +446,26 @@ def _load_replay_dynamic(
     for ln in our_laps:
         if ln not in our_samples:
             continue
-        sr = rivals_by_lap.get(ln)
-        rival_drv = (sr.driver if sr and sr.driver else focus_rival)
+        p = picks_by_lap.get(ln)
+        rival_drv = (p.driver if p and p.driver else focus_rival)
         rival_samples_n = samples_by_driver.get(rival_drv, {}).get(ln, [])
         r_status = status_by_driver.get(rival_drv, {}).get(ln, "racing")
         o_status = our_status.get(ln, "racing")
 
-        # direction + gap come straight from the selector (it already did the
-        # signed-gap / position work, causally).
-        we_lead = (sr.ahead is False) if (sr and sr.ahead is not None) else False
+        we_lead = (p.ahead is False) if (p and p.ahead is not None) else False
         gap_usable = (
-            sr.gap_s if (sr and sr.gap_s is not None
-                         and o_status == "racing" and r_status == "racing")
+            p.gap_s if (p and p.gap_s is not None
+                        and o_status == "racing" and r_status == "racing")
             else None
         )
 
         sri = None
-        if sr is not None:
+        if p is not None:
             sri = StrategicRivalInfo(
-                driver=rival_drv, role=sr.role, position=sr.position,
-                gap_s=sr.gap_s, ahead=sr.ahead,
-                relevance_score=sr.relevance_score,
+                driver=rival_drv, role=p.role, position=p.position,
+                gap_s=p.gap_s, ahead=p.ahead, relevance_score=p.relevance,
+                tick_level=p.tick_level, changes_this_lap=p.changes_this_lap,
+                tick_share=dict(p.tick_share or {}),
             )
 
         nl = condense_lap(

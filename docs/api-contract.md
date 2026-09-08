@@ -175,9 +175,12 @@ POST /api/v1/replay/historical
        "laps_replayed": [1, 53],
        "source": "fastf1_historical_replay", "model": "chronopace_2026",
        "strategic_rival": {                 // dynamic causal selection over the field
-         "dynamic": true, "focus_rival": "PIA", "selector": "...",
-         "drivers_tracked": ["NOR","OCO","PIA","SAI","VER"],
-         "changes": [ { lap, from, to, role, gap_s, relevance_score } ] },
+         "dynamic": true, "tick_level": true, "focus_rival": "PIA", "selector": "...",
+         "drivers_tracked": ["NOR","PIA","SAI"],
+         "changes": [ { lap, from, to, role, gap_s, relevance_score } ],  // lap-boundary
+         "lap_boundary_changes": [ ... ], "intra_lap_changes_total": 60,
+         "avg_switches_per_lap": 1.09,
+         "timeline_endpoint": "GET /api/v1/replay/historical/2024_italian_gp/{lap}/timeline" },
        "provenance": { "REAL": [...], "MODELED (MODEL_ASSUMPTION)": [...], "note": "..." },
        "laps": [ {
          "lap": 11,
@@ -187,7 +190,10 @@ POST /api/v1/replay/historical
          "reason_codes": [ ... ],
          "strategic_rival": { "driver": "NOR", "role": "DEFENDING_THREAT",
                               "position": 3, "gap_s": 0.59, "ahead": false,
-                              "relevance_score": 0.83 },
+                              "relevance_score": 0.83,
+                              "tick_level": true,        // derived from telemetry-tick selection
+                              "changes_this_lap": 2,     // sub-lap rival switches this lap
+                              "tick_share": { "NOR": 0.61, "PIA": 0.39 } },
          "rival_energy_inference": {          // INFERRED, not measured — no ground truth
            "label": "RIVAL ENERGY INFERENCE (probabilistic, from observable performance)",
            "driver": "NOR",                  // whose observables this estimate is built from
@@ -207,6 +213,19 @@ POST /api/v1/replay/historical
 // dynamic_rival:false  -> the original fixed two-car analysis against `rival`.
 
 GET  /api/v1/replay/historical/{race}/{lap}?driver=LEC&rival=PIA&seed=42&full_snapshot=false
+
+GET  /api/v1/replay/historical/{race}/{lap}/timeline?driver=LEC&max_ticks=400
+  -> { race, lap, our_driver, focus_rival,
+       tick_cadence_hz, total_ticks_this_lap, returned_ticks, downsample_step,
+       summary: { dominant_driver, dominant_role, dominant_ahead, dominant_gap_s,
+                  first_driver, last_driver, n_changes, share_by_driver },
+       change_events: [ { t, lap_fraction, from, to, role } ],
+       ticks: [ { t, session_time_s, driver, role, ahead, gap_s, relevance,
+                  switched, raw_leader } ],           // downsampled to max_ticks
+       provenance: { REAL, MODELED } }
+     // the telemetry-tick strategic-rival stream for one lap. Causal: each tick's
+     // pick depends only on data <= that tick. 503 when the replay used the
+     // lap-level fallback (no per-tick telemetry).
   -> { race, lap, censored_to_lap: {lap}, summary: <one lap object>,
        snapshot?: <full DecisionSnapshot when full_snapshot=true> }
 ```
