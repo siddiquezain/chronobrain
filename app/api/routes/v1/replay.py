@@ -116,11 +116,13 @@ def historical_replay(req: HistoricalReplayRequest) -> dict:
 def historical_lap(
     race: str, lap: int, driver: Optional[str] = None, rival: Optional[str] = None,
     seed: int = 42, full_snapshot: bool = False, dynamic_rival: bool = True,
+    season: Optional[int] = None, event: Optional[str] = None, session: Optional[str] = None,
 ) -> dict:
     try:
         return run_historical_lap(
             race_key=race, driver=driver, rival=rival, lap=lap, seed=seed,
             full_snapshot=full_snapshot, dynamic_rival=dynamic_rival,
+            season=season, event=event, session=session,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -137,6 +139,7 @@ def historical_lap(
 def historical_lap_timeline(
     race: str, lap: int, driver: Optional[str] = None, rival: Optional[str] = None,
     max_ticks: int = 400,
+    season: Optional[int] = None, event: Optional[str] = None, session: Optional[str] = None,
 ) -> dict:
     """Telemetry-tick strategic-rival stream for one lap (the detail behind the
     compact per-lap summary). Sub-lap rival changes are real selector output, not
@@ -144,6 +147,7 @@ def historical_lap_timeline(
     try:
         return strategic_rival_timeline(
             race_key=race, lap=lap, driver=driver, rival=rival, max_ticks=max_ticks,
+            season=season, event=event, session=session,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
