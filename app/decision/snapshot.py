@@ -35,6 +35,18 @@ class EnergyBlock(BaseModel):
     energy_is_modeled: bool = Field(
         ..., description="True when SoC came from a model, not the feed (always True for REPLAY)"
     )
+    # --- additive; None on paths that don't model the accounting components ---
+    soc_capacity_mj: float = Field(9.0, description="SoC ceiling for the scale soc_mj is on (MODEL_ASSUMPTION)")
+    recovered_this_lap_mj: Optional[float] = Field(
+        None, description="Modeled ERS recovery this lap (MJ). MODEL_ASSUMPTION."
+    )
+    net_swing_mj: Optional[float] = Field(
+        None, description="Modeled net SoC change this lap = recovered - deployed (vs a nominal lap)"
+    )
+    modeled_mgu_k_peak_kw: Optional[float] = Field(
+        None, description="Modeled peak MGU-K power this lap (kW) from the real throttle trace. MODEL_ASSUMPTION."
+    )
+    mgu_k_power_ceiling_kw: float = Field(350.0, description="Regulatory ceiling (VERIFIED_FIA)")
 
 
 class RivalBlock(BaseModel):

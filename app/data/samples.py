@@ -105,8 +105,23 @@ class NormalizedLap(BaseModel):
     # --- our car ---
     our_speed_kmh: float = Field(..., ge=0.0)
     our_soc_mj: Optional[float] = Field(None, ge=0.0, description="None if unknown")
+    our_soc_capacity_mj: float = Field(
+        9.0, gt=0.0, description="SoC ceiling for the scale our_soc_mj is on (MODEL_ASSUMPTION)"
+    )
     our_lap_start_soc_mj: Optional[float] = Field(None, ge=0.0)
-    our_lap_energy_deployed_mj: float = Field(0.0, ge=0.0)
+    our_lap_energy_deployed_mj: float = Field(0.0, ge=0.0, description="Modeled MGU-K deployment this lap (MJ)")
+    our_lap_energy_recovered_mj: Optional[float] = Field(
+        None, ge=0.0, description="Modeled ERS recovery this lap (MJ) — brake regen + coast harvest"
+    )
+    our_lap_net_swing_mj: Optional[float] = Field(
+        None, description="Modeled net SoC change this lap (recovered - deployed vs a nominal lap)"
+    )
+    our_mean_throttle: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="REAL — mean throttle fraction over the lap"
+    )
+    our_mean_brake: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="REAL — mean brake fraction over the lap"
+    )
     gap_to_car_ahead_s: Optional[float] = Field(None, ge=0.0)
     gap_to_car_behind_s: Optional[float] = Field(
         None, ge=0.0, description="Rearward gap — strategic 'defending' signal only, never legality"

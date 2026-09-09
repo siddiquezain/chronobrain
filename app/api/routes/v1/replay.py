@@ -138,16 +138,17 @@ def historical_lap(
 @router.get("/historical/{race}/{lap}/timeline")
 def historical_lap_timeline(
     race: str, lap: int, driver: Optional[str] = None, rival: Optional[str] = None,
-    max_ticks: int = 400,
+    max_ticks: int = 400, debug: bool = False,
     season: Optional[int] = None, event: Optional[str] = None, session: Optional[str] = None,
 ) -> dict:
     """Telemetry-tick strategic-rival stream for one lap (the detail behind the
     compact per-lap summary). Sub-lap rival changes are real selector output, not
-    a cosmetic timeline."""
+    a cosmetic timeline. `?debug=true` adds the per-tick, per-candidate score
+    breakdown and the reason each switch did / did not happen."""
     try:
         return strategic_rival_timeline(
             race_key=race, lap=lap, driver=driver, rival=rival, max_ticks=max_ticks,
-            season=season, event=event, session=session,
+            debug=debug, season=season, event=event, session=session,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc

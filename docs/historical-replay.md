@@ -106,15 +106,29 @@ full field (all drivers' position / gap / trend / pace / pit status, <= lap N)
   w_gap_trend·trend + w_pace·pace + w_directional·directional`, damped for a
   pitting car or a car past the strategic gap ceiling. All weights/thresholds are
   in `RivalSelectorConfig` (MODEL_ASSUMPTION — a deterministic model, not learned).
-* Role is directional: `ATTACK_TARGET` (rival ahead, in range), `DEFENDING_THREAT`
-  (rival behind, in range), `POSITION_BATTLE` (adjacent in the order), or `NONE`
-  (nobody worth spending energy against — the decision still runs).
-* When the tracked opponent's **identity changes**, the particle filter is reset
-  to its prior — we have no prior information about a car we just started watching.
+* Role (`strategic_rival.classify_role`, one function for both the lap-level and
+  tick-level paths):
+  * `ATTACK_TARGET` — directly ahead **and** within the overtake-proximity range (racing)
+  * `DEFENDING_THREAT` — directly behind **and** within that range (racing)
+  * `POSITION_BATTLE` — adjacent in the running order **and** within
+    `position_battle_max_gap_s` (2.0 s) — a genuine fight for track position
+  * `STRATEGICALLY_RELEVANT` — relevant, but neither in immediate range nor a
+    close position fight (adjacent-but-distant, or 2+ places away)
+  * `NONE` — nobody clears the relevance floor (the decision still runs)
+* **Identity-aware energy**: one particle filter **per tracked driver**. Each sees
+  only that driver's own observations; when the strategic rival switches away and
+  later returns, its filter **resumes** from where it left off — it is not
+  restarted, and it never sees another driver's data. Per-driver deterministic
+  seeding.
 * `rival:` in the snapshot gains `driver` / `role` / `strategic_position` /
   `strategic_gap_s` / `strategic_rival_ahead` / `relevance_score` (all additive;
   `None` on the synthetic path and the fixed two-car replay). The trace emits
   `STRATEGIC_RIVAL_SELECTED` and `STRATEGIC_RIVAL_CHANGED`.
+* `GET .../{lap}/timeline?debug=true` returns, per tick, **every candidate's
+  relevance score + gap + ahead/behind + closing rate + position**, the selected
+  rival, whether a switch happened, and *why* (`margin_exceeded` /
+  `hysteresis_held` / `dwell_not_met` / `held` / `initial` / `incumbent_gone`).
+  Every number comes from the engine.
 * `dynamic_rival: false` keeps the original fixed two-car analysis against `rival`.
 * The `rival` request parameter is now the **focus / fallback** rival (used on
   laps where no opponent clears the relevance floor).
@@ -144,17 +158,47 @@ Two things the replay derives from **data available at lap N** (never the future
   is withheld (no fake overtake window), our modelled SoC is carried across
   unchanged, and the Data Quality Gate marks the lap `DEGRADED`.
 
-## What is REAL vs MODELED
+## Telemetry cadence (honest)
 
-| REAL (2024 FastF1 / official F1 timing) | MODELED (`MODEL_ASSUMPTION`) |
-|---|---|
-| lap & sector timing, speed, throttle, brake, gear, RPM, DRS, distance | **rival hidden energy** — *inferred* probabilistically from observable performance (terminal speed, clipping point, corner-exit accel, sector delta). The 2024 cars' real ERS SoC is not public and is **never used.** |
-| actual observable driver performance, lap by lap | **our own SoC / energy budget** — a 2026-model mean-reverting trajectory (`ReplayEnergyModel.next_soc`). `energy_is_modeled = true` on every lap. |
-| relative gap (cumulative lap-time difference through lap N) | the **ChronoPace 2026 decision model**, Monte Carlo outcomes, opportunity probabilities, and regulatory-legality assumptions. |
+FastF1 historical car telemetry is **~4 Hz** (source-dependent — measured per
+replay from the reconstructed tick grid, ~330 samples/lap on 2024 data). It is
+**not a 128 Hz raw stream** and not a live feed. The replay response carries a
+`telemetry` block: `{ source, kind: "HISTORICAL TELEMETRY REPLAY",
+cadence_hz_measured, cadence_note, ticks_total, is_live: false, is_synthetic:
+false }`. Synthetic mode is labelled `data_mode: "SYNTHETIC"` and
+`energy_is_modeled: false` (the simulator's SoC is its own ground truth).
 
-**The 2024 cars did not run under ChronoPace's 2026 energy rules.** Real 2024
-telemetry flows through the 2026 decision model. Regulatory constants
-(`VERIFIED_FIA` vs `MODEL_ASSUMPTION`) are unchanged — see `docs/regulation.md`.
+## Modelled energy — explicit accounting
+
+F1 publishes **no ERS state of charge**, so our SoC is modelled. It is an explicit
+per-lap accounting relationship (`ReplayEnergyModel`), causal, deterministic:
+
+```
+deployed(lap)  = 2.6 MJ * throttle_fraction
+recovered(lap) = 2.3 MJ * brake_fraction  +  1.9 MJ * (1 - throttle_fraction)
+net_swing      = (recovered - deployed) - (recovered_nominal - deployed_nominal)
+SoC_next       = clip( SoC + net_swing + 0.05*(4.5 - SoC),  0.3 MJ,  9.0 MJ )
+```
+
+Every field is exposed and labelled MODELED: `soc_mj`, `soc_pct`,
+`soc_capacity_mj`, `deployed_this_lap_mj`, `recovered_this_lap_mj`,
+`net_swing_mj`, `modeled_mgu_k_peak_kw`, `mgu_k_power_ceiling_kw`. The compliance
+block's `MGU-K power ceiling` check now verifies `modeled_mgu_k_peak_kw <=
+max_ers_k_power_kw` (a real `pass`/`breach`, not a hardcoded string). The 2024
+cars did **not** run under the 2026 energy budget.
+
+## What is REAL vs MODELED vs INFERRED
+
+| REAL (2024 FastF1 / official F1 timing) | MODELED (`MODEL_ASSUMPTION`) | INFERRED (probabilistic) |
+|---|---|---|
+| speed, throttle, brake, gear, RPM, DRS, distance; lap & sector timing; running position; relative gap | our own SoC / deployment / recovery / net swing / MGU-K peak power; the ChronoPace 2026 decision model, Monte Carlo outcomes, opportunity probabilities, regulatory-legality assumptions; which opponent is "strategically relevant" | the **strategic rival's hidden energy** distribution (mean / std / bucket) from observable performance — no car's real ERS SoC is public or used |
+
+Each replay lap carries a `provenance` block spelling this out, plus the note:
+**REAL 2024 OBSERVATION + CHRONOPACE 2026 MODEL = REPLAYED 2026 DECISION CONTEXT.**
+
+**The 2024 cars did not run under ChronoPace's 2026 energy rules.** Regulatory
+constants (`VERIFIED_FIA` vs `MODEL_ASSUMPTION`) are unchanged — see
+`docs/regulation.md`.
 
 Never claim *"we know Piastri's actual battery state."* ChronoPace **infers a
 probabilistic rival energy state from observable historical performance** —

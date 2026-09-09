@@ -40,6 +40,7 @@ import numpy as np
 from app.replay.strategic_rival import (
     RivalCandidate,
     RivalSelectorConfig,
+    classify_role,
     score_matrix,
     select_strategic_rival,
 )
@@ -307,16 +308,25 @@ class FieldTimeline:
         return np.where(self._present, np.round(rel, 4), -1.0)
 
     # -- the tick-level selection stream ----------------------------
-    def selection_timeline(self, config: Optional[RivalSelectorConfig] = None) -> List[TickSelection]:
+    def selection_timeline(
+        self, config: Optional[RivalSelectorConfig] = None, *, debug_sink: Optional[list] = None,
+    ) -> List[TickSelection]:
         cfg = config or RivalSelectorConfig()
         rel = self.relevance_matrix(cfg)
         return _hysteresis_over_matrix(
             rel=rel, drivers=self.drivers, ticks=self.ticks, lap_of=self.lap_of_tick,
             gap_s=self._gap_s, ahead=self._ahead, apart=self._apart, status=self._status,
-            pos=self._pos_at_tick,
-            immediate_range_s=cfg.immediate_range_s, relevant_floor=cfg.relevant_floor,
-            switch_margin=cfg.switch_margin, min_dwell_ticks=cfg.min_dwell_ticks,
+            pos=self._pos_at_tick, trend=self._trend, cfg=cfg, debug_sink=debug_sink,
         )
+
+    def debug_timeline(
+        self, config: Optional[RivalSelectorConfig] = None, *, lap: Optional[int] = None,
+    ) -> List[dict]:
+        """Per-tick, per-candidate score breakdown + switch reason — for the
+        timeline debug view. Deterministic and causal (same as `selection_timeline`)."""
+        sink: List[dict] = []
+        self.selection_timeline(config, debug_sink=sink)
+        return [row for row in sink if lap is None or row["lap"] == lap]
 
     # -- lap-level summary (spec §3) -------------------------------
     def lap_summaries(
@@ -363,9 +373,8 @@ class FieldTimeline:
 def _hysteresis_over_matrix(
     *, rel: np.ndarray, drivers: List[str], ticks: np.ndarray, lap_of: np.ndarray,
     gap_s: np.ndarray, ahead: np.ndarray, apart: np.ndarray, status: np.ndarray,
-    pos: np.ndarray,
-    immediate_range_s: float, relevant_floor: float,
-    switch_margin: float, min_dwell_ticks: int,
+    pos: np.ndarray, trend: np.ndarray, cfg: RivalSelectorConfig,
+    debug_sink: Optional[list] = None,
 ) -> List[TickSelection]:
     T, D = rel.shape
     best_j = np.argmax(rel, axis=1)
@@ -376,16 +385,19 @@ def _hysteresis_over_matrix(
     for i in range(T):
         bj = int(best_j[i])
         pick = bj
+        reason = "initial" if inc < 0 else "held"
         if inc >= 0 and rel[i, inc] >= 0.0:
             inc_rel = rel[i, inc]
             if bj == inc:
-                pick = inc
-            elif dwell < min_dwell_ticks:
-                pick = inc
-            elif best_rel[i] - inc_rel >= switch_margin:
-                pick = bj
+                pick, reason = inc, "held"
+            elif dwell < cfg.min_dwell_ticks:
+                pick, reason = inc, "dwell_not_met"
+            elif best_rel[i] - inc_rel >= cfg.switch_margin:
+                pick, reason = bj, "margin_exceeded"
             else:
-                pick = inc
+                pick, reason = inc, "hysteresis_held"
+        elif inc >= 0:
+            reason = "incumbent_gone"
         switched = inc >= 0 and pick != inc
         if pick != inc:
             inc, dwell = pick, 0
@@ -395,25 +407,39 @@ def _hysteresis_over_matrix(
         r = float(rel[i, pick]) if rel[i, pick] >= 0 else 0.0
         av = ahead[i, pick]
         is_ahead = None if np.isnan(av) else bool(av > 0.5)
-        if r < relevant_floor:
-            role = "NONE"
-        else:
-            in_range = (np.isfinite(gap_s[i, pick]) and gap_s[i, pick] <= immediate_range_s
-                        and int(status[i, pick]) == 0)
-            if in_range and is_ahead is True:
-                role = "ATTACK_TARGET"
-            elif in_range and is_ahead is False:
-                role = "DEFENDING_THREAT"
-            elif np.isfinite(apart[i, pick]) and apart[i, pick] <= 1:
-                role = "POSITION_BATTLE"
-            else:
-                role = "STRATEGICALLY_RELEVANT"
+        role = classify_role(
+            gap_s=(float(gap_s[i, pick]) if np.isfinite(gap_s[i, pick]) else None),
+            ahead=is_ahead,
+            positions_apart=(float(apart[i, pick]) if np.isfinite(apart[i, pick]) else None),
+            lap_status=("racing" if int(status[i, pick]) == 0 else "pit"),
+            relevance=r, cfg=cfg,
+        )
         pp = int(pos[i, pick]) if np.isfinite(pos[i, pick]) and pos[i, pick] > 0 else None
         out.append(TickSelection(
             t=float(ticks[i]), lap=int(lap_of[i]), driver=drivers[pick], role=role,
             ahead=is_ahead, gap_s=round(float(gap_s[i, pick]), 3) if np.isfinite(gap_s[i, pick]) else None,
             relevance_score=round(r, 4), position=pp, raw_leader=drivers[bj], switched=switched,
         ))
+        if debug_sink is not None:
+            debug_sink.append({
+                "t": float(ticks[i]), "lap": int(lap_of[i]),
+                "selected": drivers[pick], "raw_leader": drivers[bj],
+                "switched": switched, "switch_reason": reason, "dwell_ticks": dwell,
+                "candidates": [
+                    {
+                        "driver": drivers[j],
+                        "relevance": round(float(rel[i, j]), 4) if rel[i, j] >= 0 else None,
+                        "gap_s": (round(float(gap_s[i, j]), 3) if np.isfinite(gap_s[i, j]) else None),
+                        "ahead": (None if np.isnan(ahead[i, j]) else bool(ahead[i, j] > 0.5)),
+                        "closing_rate_s_per_lap": (round(float(trend[i, j]), 4)
+                                                   if np.isfinite(trend[i, j]) else None),
+                        "positions_apart": (int(apart[i, j]) if np.isfinite(apart[i, j]) else None),
+                        "position": (int(pos[i, j]) if np.isfinite(pos[i, j]) and pos[i, j] > 0 else None),
+                        "lap_status": ("racing" if int(status[i, j]) == 0 else "not_racing"),
+                    }
+                    for j in range(D) if rel[i, j] >= 0.0
+                ],
+            })
     return out
 
 

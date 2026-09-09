@@ -163,10 +163,27 @@ def lap_summary(snap: DecisionSnapshot, nl: Optional[NormalizedLap] = None) -> d
             "legal": snap.compliance.legal,
             "legal_modes": snap.compliance.legal_modes,
         },
-        "energy": {
+        "energy": {   # MODELED — F1 publishes no ERS SoC; this is ChronoPace's 2026 model
+            "label": "MODELED CHRONOPACE 2026 ENERGY STATE (not measured — F1 publishes no ERS SoC)",
             "soc_mj": snap.energy.soc_mj,
+            "soc_pct": snap.energy.soc_pct,
+            "soc_capacity_mj": snap.energy.soc_capacity_mj,
+            "lap_start_soc_mj": snap.energy.lap_start_soc_mj,
+            "deployed_this_lap_mj": snap.energy.deployed_this_lap_mj,
+            "recovered_this_lap_mj": snap.energy.recovered_this_lap_mj,
+            "net_swing_mj": snap.energy.net_swing_mj,
+            "deployment_headroom_mj": snap.energy.deployment_headroom_mj,
+            "projected_reserve_mj": snap.energy.projected_reserve_mj,
+            "modeled_mgu_k_peak_kw": snap.energy.modeled_mgu_k_peak_kw,
+            "mgu_k_power_ceiling_kw": snap.energy.mgu_k_power_ceiling_kw,
             "can_afford_aggressive": snap.energy.can_afford_aggressive,
             "energy_is_modeled": snap.energy.energy_is_modeled,
+            "accounting": "SoC_next = SoC + recovered - deployed (net of a nominal lap), clipped [floor, capacity]",
+        },
+        "telemetry_real": {   # REAL 2024 FastF1 observation for this lap
+            "mean_throttle": (nl.our_mean_throttle if nl is not None else None),
+            "mean_brake": (nl.our_mean_brake if nl is not None else None),
+            "top_speed_kmh": (nl.our_speed_kmh if nl is not None else None),
         },
         "data_quality": {
             "status": snap.data_quality.status,
@@ -179,8 +196,26 @@ def lap_summary(snap: DecisionSnapshot, nl: Optional[NormalizedLap] = None) -> d
         "our_speed_kmh": (nl.our_speed_kmh if nl is not None else None),
         "lap_status": (nl.lap_status if nl is not None else None),
         "rival_lap_status": (nl.rival_lap_status if nl is not None else None),
+        "provenance": _LAP_PROVENANCE,
         "trace": [{"stage": s.stage, "detail": s.detail} for s in snap.trace],
     }
+
+
+_LAP_PROVENANCE = {
+    "REAL (2024 FastF1 observation)": [
+        "speed, throttle, brake, gear, RPM, DRS, distance",
+        "lap & sector timing, running position, relative gap",
+    ],
+    "MODELED (ChronoPace 2026, MODEL_ASSUMPTION)": [
+        "own SoC / deployment / recovery / net swing / MGU-K peak power",
+        "opportunity probability, Monte Carlo outcomes, confidence, the deployment-mode decision",
+    ],
+    "INFERRED (probabilistic, from observable performance)": [
+        "the strategic rival's hidden energy distribution (mean / std / bucket) — no car's real ERS SoC is public or used",
+    ],
+    "note": "REAL 2024 OBSERVATION + CHRONOPACE 2026 MODEL = REPLAYED 2026 DECISION CONTEXT. "
+            "The 2024 cars did NOT run under 2026 energy regulations.",
+}
 
 
 def _relative_gap(nl: Optional[NormalizedLap]) -> Optional[float]:
@@ -256,6 +291,7 @@ def strategic_rival_timeline(
     rival: Optional[str] = None,
     cache_dir: str = _DEFAULT_CACHE,
     max_ticks: int = 400,
+    debug: bool = False,
     season: Optional[int] = None,
     event: Optional[str] = None,
     session: Optional[str] = None,
@@ -316,12 +352,39 @@ def strategic_rival_timeline(
             }
             for x in sampled
         ],
+        "debug": (
+            _timeline_debug_rows(ft, lap, t0, step)
+            if debug else
+            "pass ?debug=true for the per-tick, per-candidate score breakdown + switch reason"
+        ),
         "provenance": {
             "REAL": "FastF1 per-driver car telemetry (SessionTime, speed) + official running position",
             "MODELED": "which opponent is 'strategically relevant' at each tick — deterministic score "
                        "over reconstructed track gap / adjacency / closing rate / pace (MODEL_ASSUMPTION)",
         },
     }
+
+
+def _timeline_debug_rows(ft, lap: int, t0: float, step: int) -> list:
+    """Per-tick candidate scores + switch reason, so a rival switch can be
+    reconstructed: `t | PIA score | NOR score | selected | switch_reason`.
+    Every number comes from the engine — nothing hardcoded."""
+    rows = ft.debug_timeline(lap=lap)
+    return [
+        {
+            "t": round(r["t"] - t0, 3),
+            "session_time_s": round(r["t"], 3),
+            "selected": r["selected"],
+            "raw_leader": r["raw_leader"],
+            "switched": r["switched"],
+            "switch_reason": r["switch_reason"],
+            "dwell_ticks": r["dwell_ticks"],
+            "candidates": sorted(
+                r["candidates"], key=lambda c: (c["relevance"] is None, -(c["relevance"] or 0.0))
+            ),
+        }
+        for r in rows[::step]
+    ]
 
 
 def run_historical_replay(
@@ -366,6 +429,7 @@ def run_historical_replay(
         "race": _race_meta(race, drv, riv, len(available)),
         "driver": drv,
         "rival": riv,
+        "telemetry": _telemetry_meta(race, drv),
         "total_laps": race.scheduled_laps or max(available),
         "laps_replayed": [start, end],
         "source": "fastf1_historical_replay",
@@ -417,6 +481,30 @@ def run_historical_replay(
                     "HISTORICAL TELEMETRY REPLAY · CHRONOPACE 2026 MODEL.",
         },
         "laps": laps_out,
+    }
+
+
+def _telemetry_meta(race: HistoricalRace, driver: str) -> dict:
+    """Honest telemetry source + cadence metadata. FastF1 historical car telemetry
+    is NOT a 128 Hz raw stream — the actual cadence is source-dependent (~4 Hz on
+    2024 data). Measured from the reconstructed tick grid when available."""
+    from app.data.fastf1_service import field_timeline_cache_key, get_cached_field_timeline
+    cadence_hz = None
+    ticks_total = None
+    ft = get_cached_field_timeline(field_timeline_cache_key(race.year, race.event, race.session, driver))
+    if ft is not None and getattr(ft, "ticks", None) is not None and len(ft.ticks) > 2:
+        import numpy as np
+        dt = float(np.median(np.diff(ft.ticks)))
+        cadence_hz = round(1.0 / dt, 1) if dt > 0 else None
+        ticks_total = int(len(ft.ticks))
+    return {
+        "source": "FastF1 historical (official F1 timing + car telemetry archive)",
+        "kind": "HISTORICAL TELEMETRY REPLAY",
+        "cadence_hz_measured": cadence_hz,
+        "cadence_note": "SOURCE-DEPENDENT / ~4 Hz typical for 2024 car data — NOT a 128 Hz raw stream",
+        "ticks_total": ticks_total,
+        "is_live": False,
+        "is_synthetic": False,
     }
 
 

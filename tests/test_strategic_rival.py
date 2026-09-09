@@ -79,12 +79,50 @@ def test_directional_roles():
     assert defend.role == "DEFENDING_THREAT"
 
 
-def test_position_battle_role_when_adjacent_but_not_in_range():
-    sr = select_strategic_rival([
+def test_position_battle_only_when_adjacent_AND_close():
+    # adjacent in the order + a genuine fighting gap (< position_battle_max_gap_s) -> POSITION_BATTLE
+    close = select_strategic_rival([
+        RivalCandidate("RUS", position=3, gap_s=1.6, ahead=True,
+                       gap_trend_s_per_lap=-0.05, pace_delta_s=0.1, positions_apart=1),
+    ])
+    assert close.role == "POSITION_BATTLE"
+
+    # adjacent in the order BUT well clear (2.5 s) -> not a "battle", just relevant
+    far = select_strategic_rival([
         RivalCandidate("RUS", position=3, gap_s=2.5, ahead=True,
                        gap_trend_s_per_lap=-0.05, pace_delta_s=0.1, positions_apart=1),
     ])
-    assert sr.role == "POSITION_BATTLE"
+    assert far.role == "STRATEGICALLY_RELEVANT"
+
+
+def test_role_classification_matrix():
+    """Issue 10 — POSITION_BATTLE must mean an actual fight for position, not just
+    'adjacent in the running order regardless of gap'."""
+    from app.replay.strategic_rival import classify_role, RivalSelectorConfig
+    cfg = RivalSelectorConfig()
+
+    def role(gap, ahead, apart, rel=0.8, status="racing"):
+        return classify_role(gap_s=gap, ahead=ahead, positions_apart=apart,
+                             lap_status=status, relevance=rel, cfg=cfg)
+
+    # very close, ahead / behind -> directional
+    assert role(0.3, True, 1) == "ATTACK_TARGET"
+    assert role(0.3, False, 1) == "DEFENDING_THREAT"
+    assert role(1.0, True, 1) == "ATTACK_TARGET"        # exactly at the proximity rule
+    # moderate gap, adjacent -> POSITION_BATTLE (still a fight)
+    assert role(1.5, True, 1) == "POSITION_BATTLE"
+    assert role(2.0, False, 1) == "POSITION_BATTLE"     # exactly at the battle cutoff
+    # large gap, adjacent -> NOT a battle
+    assert role(2.1, True, 1) == "STRATEGICALLY_RELEVANT"
+    assert role(6.0, False, 1) == "STRATEGICALLY_RELEVANT"
+    # two places apart -> never a battle even if close-ish
+    assert role(1.2, True, 2) == "STRATEGICALLY_RELEVANT"
+    # closing rapidly but far -> still not a battle (gap is what defines a battle)
+    assert role(4.0, True, 1) == "STRATEGICALLY_RELEVANT"
+    # below the floor -> NONE
+    assert role(0.5, True, 1, rel=0.05) == "NONE"
+    # in-range but pitting -> not a directional threat
+    assert role(0.4, True, 1, status="pit") in ("POSITION_BATTLE", "STRATEGICALLY_RELEVANT", "NONE")
 
 
 # ---------------------------------------------------------------------------

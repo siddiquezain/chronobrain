@@ -109,6 +109,10 @@ class RivalSelectorConfig:
     # gap (s) at or under which the *directional* role (attack / defend) applies.
     # Defaults to the 2026 overtake-proximity rule so the two never drift apart.
     immediate_range_s: float = field(default_factory=lambda: GateConfig().overtake_detection_gap_threshold_s)
+    # gap (s) at or under which an ADJACENT-in-the-order car is a genuine position
+    # fight (POSITION_BATTLE). Further away but still adjacent in the running order
+    # -> STRATEGICALLY_RELEVANT, not a "battle". MODEL_ASSUMPTION.
+    position_battle_max_gap_s: float = 2.0
 
     # --- tick-level switching stability (hysteresis) -----------------------
     # A challenger must beat the *current* incumbent's live score by this margin
@@ -255,17 +259,47 @@ def score_matrix(
     return np.round(np.clip(raw, 0.0, 1.0) * damping, 4)
 
 
-def _role_for(c: RivalCandidate, relevance: float, cfg: RivalSelectorConfig) -> Role:
+def classify_role(
+    *,
+    gap_s: Optional[float],
+    ahead: Optional[bool],
+    positions_apart: Optional[float],
+    lap_status: str,
+    relevance: float,
+    cfg: Optional[RivalSelectorConfig] = None,
+) -> Role:
+    """The single source of truth for strategic-rival role semantics.
+
+      NONE                 - below the relevance floor (nobody worth spending energy on)
+      ATTACK_TARGET        - directly ahead AND within the overtake-proximity range (racing)
+      DEFENDING_THREAT     - directly behind AND within that range (racing)
+      POSITION_BATTLE      - adjacent in the running order AND within `position_battle_max_gap_s`
+                             (a genuine fight for track position)
+      STRATEGICALLY_RELEVANT - relevant, but neither in immediate range nor a close
+                             position fight (adjacent-but-distant, or 2+ places away)
+    """
+    cfg = cfg or _DEFAULT_CONFIG
     if relevance < cfg.relevant_floor:
         return "NONE"
-    in_range = c.gap_s is not None and c.gap_s <= cfg.immediate_range_s and c.lap_status == _RACING
-    if in_range and c.ahead is True:
+    in_range = gap_s is not None and gap_s <= cfg.immediate_range_s and lap_status == _RACING
+    if in_range and ahead is True:
         return "ATTACK_TARGET"
-    if in_range and c.ahead is False:
+    if in_range and ahead is False:
         return "DEFENDING_THREAT"
-    if c.positions_apart is not None and c.positions_apart <= 1:
+    close_position_fight = (
+        positions_apart is not None and positions_apart <= 1
+        and gap_s is not None and gap_s <= cfg.position_battle_max_gap_s
+    )
+    if close_position_fight:
         return "POSITION_BATTLE"
     return "STRATEGICALLY_RELEVANT"
+
+
+def _role_for(c: RivalCandidate, relevance: float, cfg: RivalSelectorConfig) -> Role:
+    return classify_role(
+        gap_s=c.gap_s, ahead=c.ahead, positions_apart=c.positions_apart,
+        lap_status=c.lap_status, relevance=relevance, cfg=cfg,
+    )
 
 
 def select_strategic_rival(

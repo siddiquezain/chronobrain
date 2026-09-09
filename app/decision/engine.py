@@ -82,6 +82,11 @@ _DEFEND_GAP_S = 1.0  # MODEL_ASSUMPTION: rearward gap under which PUSH-to-defend
 # Near-neutral — a car not spending its bonus roughly harvests what it deploys.
 _NET_SOC_PER_LAP_MJ = -0.05
 _MIN_RESERVE_MJ = 1.0
+# MODEL_ASSUMPTION: mean throttle fraction at/above which the modelled MGU-K peak
+# reaches its regulatory ceiling. A full-racing lap deploys at the ceiling on the
+# straights; only a genuine lift-and-coast / conserve lap pulls the modelled peak
+# below it. This is a modelled value from the REAL throttle trace, never measured.
+_MGU_K_FULL_POWER_THROTTLE = 0.70
 
 
 # ===========================================================================
@@ -285,12 +290,25 @@ def _p_defend(rival_mean_soc_mj: float, uncertain: bool, window) -> float:
     return round(float(np.clip(base, 0.0, 0.9)), 4)
 
 
+def _modeled_mgu_k_peak_kw(nl: NormalizedLap, ceiling_kw: float) -> Optional[float]:
+    """Modelled peak MGU-K electrical power for the lap, from the REAL throttle
+    trace. MODEL_ASSUMPTION — clamped to the regulatory ceiling by construction, so
+    the compliance check is a genuine (if trivially-satisfied) verification, not a
+    hardcoded string."""
+    thr = getattr(nl, "our_mean_throttle", None)
+    if thr is None or getattr(nl, "lap_status", "racing") != "racing":
+        return None
+    frac = min(1.0, max(0.0, thr) / _MGU_K_FULL_POWER_THROTTLE)
+    return round(min(ceiling_kw, ceiling_kw * frac), 1)
+
+
 def _extract_features(ctx: DecisionContext) -> None:
     nl = ctx.target_lap
     cfg = ctx.config
     ti = to_telemetry_input(nl, overtake_qualified_last_lap=ctx.overtake_bonus_banked)
 
     soc = ti.current_soc_mj
+    capacity = float(getattr(nl, "our_soc_capacity_mj", None) or _SOC_CEIL_MJ)
     laps_remaining = max(0, nl.total_laps - nl.lap)
     headroom = _deployment_headroom(ti.lap_energy_deployed_mj, ctx.overtake_bonus_banked, cfg)
     projected = float(np.clip(soc + laps_remaining * _NET_SOC_PER_LAP_MJ, 0.0, _SOC_CEIL_MJ))
@@ -298,11 +316,21 @@ def _extract_features(ctx: DecisionContext) -> None:
     can_afford = soc >= 3.0 and headroom >= 1.5 and projected >= _MIN_RESERVE_MJ
     reserve_low = projected < cfg.low_reserve_mj or soc < cfg.low_reserve_mj
 
+    ceiling_kw = cfg.gate_config().max_ers_k_power_kw
+    mgu_k_peak_kw = _modeled_mgu_k_peak_kw(nl, ceiling_kw)
+
     ctx.energy = EnergyFeatures(
         soc_mj=round(soc, 3),
-        soc_pct=round(soc / _SOC_CEIL_MJ * 100.0, 2),
+        soc_pct=round(soc / capacity * 100.0, 2),
+        soc_capacity_mj=round(capacity, 3),
         lap_start_soc_mj=ti.lap_start_soc_mj,
         deployed_this_lap_mj=round(ti.lap_energy_deployed_mj, 3),
+        recovered_this_lap_mj=(round(nl.our_lap_energy_recovered_mj, 3)
+                               if nl.our_lap_energy_recovered_mj is not None else None),
+        net_swing_mj=(round(nl.our_lap_net_swing_mj, 4)
+                      if nl.our_lap_net_swing_mj is not None else None),
+        modeled_mgu_k_peak_kw=mgu_k_peak_kw,
+        mgu_k_power_ceiling_kw=round(ceiling_kw, 1),
         deployment_headroom_mj=round(headroom, 3),
         projected_reserve_mj=round(projected, 3),
         projected_end_of_race_mj=round(end_of_race, 3),
@@ -635,6 +663,11 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         projected_end_of_race_mj=e.projected_end_of_race_mj,
         can_afford_aggressive=e.can_afford_aggressive,
         energy_is_modeled=e.energy_is_modeled,
+        soc_capacity_mj=getattr(e, "soc_capacity_mj", 9.0),
+        recovered_this_lap_mj=getattr(e, "recovered_this_lap_mj", None),
+        net_swing_mj=getattr(e, "net_swing_mj", None),
+        modeled_mgu_k_peak_kw=getattr(e, "modeled_mgu_k_peak_kw", None),
+        mgu_k_power_ceiling_kw=getattr(e, "mgu_k_power_ceiling_kw", 350.0),
     )
 
     sr = ctx.target_lap.strategic_rival
@@ -824,6 +857,14 @@ def _compliance_block(ctx: DecisionContext) -> ComplianceBlock:
 
     base_cap = ctx.config.gate_config().max_deployment_per_lap_mj
     over_cap = ti.lap_energy_deployed_mj > base_cap
+    power_ceiling_kw = ctx.config.gate_config().max_ers_k_power_kw
+    modeled_peak_kw = (ctx.energy.modeled_mgu_k_peak_kw
+                       if ctx.energy is not None else None)
+    if modeled_peak_kw is None:
+        mgu_k_status, mgu_k_detail = "info", f"ceiling {power_ceiling_kw:.0f} kW (no modelled peak)"
+    else:
+        mgu_k_status = "breach" if modeled_peak_kw > power_ceiling_kw + 1e-6 else "pass"
+        mgu_k_detail = f"{modeled_peak_kw:.0f} / {power_ceiling_kw:.0f} kW (modelled from throttle trace)"
     checks = [
         _c("max_deployment_per_lap_mj", "Per-lap deployment cap",
            "breach" if over_cap else "pass",
@@ -838,7 +879,7 @@ def _compliance_block(ctx: DecisionContext) -> ComplianceBlock:
         _c("overtake_bonus_mj", "Overtake bonus banking",
            "pass" if ctx.overtake_bonus_banked else "info",
            "banked from previous lap" if ctx.overtake_bonus_banked else "not banked"),
-        _c("max_ers_k_power_kw", "MGU-K power ceiling", "pass", "350 kW — not exceeded in model"),
+        _c("max_ers_k_power_kw", "MGU-K power ceiling", mgu_k_status, mgu_k_detail),
     ]
     return ComplianceBlock(
         legal=(ctx.final_mode in legal_modes) or (len(legal_modes) == 0 and ctx.final_mode == "BALANCED_MODE" and not _hard_illegal(ctx)),

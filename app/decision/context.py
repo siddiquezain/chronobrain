@@ -41,6 +41,11 @@ class EnergyFeatures:
     can_afford_aggressive: bool
     reserve_low: bool
     energy_is_modeled: bool
+    soc_capacity_mj: float = 9.0
+    recovered_this_lap_mj: Optional[float] = None
+    net_swing_mj: Optional[float] = None
+    modeled_mgu_k_peak_kw: Optional[float] = None
+    mgu_k_power_ceiling_kw: float = 350.0
 
 
 @dataclass

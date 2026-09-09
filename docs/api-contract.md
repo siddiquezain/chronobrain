@@ -55,7 +55,10 @@ GET /api/v1/health   → { status, service, version, fastf1_available }
                   "opportunity_trend" },   // IMPROVING | STABLE | DECAYING
   "energy":     { "soc_mj", "soc_pct", "lap_start_soc_mj", "deployed_this_lap_mj",
                   "deployment_headroom_mj", "projected_reserve_mj",
-                  "projected_end_of_race_mj", "can_afford_aggressive", "energy_is_modeled" },
+                  "projected_end_of_race_mj", "can_afford_aggressive", "energy_is_modeled",
+                  // additive — the MODELED 2026 energy accounting components:
+                  "soc_capacity_mj", "recovered_this_lap_mj", "net_swing_mj",
+                  "modeled_mgu_k_peak_kw", "mgu_k_power_ceiling_kw" },
   "rival":      { "mean_reserve_mj", "reserve_std_mj", "n_observations", "confidence",
                   "estimate_uncertain", "bucket",                     // LOW|MEDIUM|HIGH
                   "distribution": { "low", "medium", "high" },        // sums to 1
@@ -191,6 +194,10 @@ POST /api/v1/replay/historical
        "driver": "LEC", "rival": "PIA", "total_laps": 53,
        "laps_replayed": [1, 53],
        "source": "fastf1_historical_replay", "model": "chronopace_2026",
+       "telemetry": { "source": "FastF1 historical", "kind": "HISTORICAL TELEMETRY REPLAY",
+                      "cadence_hz_measured": 4.2,                  // NOT 128 Hz — source-dependent
+                      "cadence_note": "...~4 Hz typical for 2024...NOT a 128 Hz raw stream",
+                      "ticks_total": 16817, "is_live": false, "is_synthetic": false },
        "strategic_rival": {                 // dynamic causal selection over the field
          "dynamic": true, "tick_level": true, "focus_rival": "PIA", "selector": "...",
          "drivers_tracked": ["NOR","PIA","SAI"],
@@ -220,10 +227,22 @@ POST /api/v1/replay/historical
                           current_window_overtake_prob, foregone_strategy, foregone_value_gap_s },
          "monte_carlo": { n_iterations, seed, recommended_mode, ranked_modes:[...] },
          "compliance": { legal, legal_modes },
-         "energy": { soc_mj, can_afford_aggressive, energy_is_modeled:true },
+         "energy": {                          // MODELED — F1 publishes no ERS SoC
+           "label": "MODELED CHRONOPACE 2026 ENERGY STATE (not measured...)",
+           "soc_mj", "soc_pct", "soc_capacity_mj", "lap_start_soc_mj",
+           "deployed_this_lap_mj", "recovered_this_lap_mj", "net_swing_mj",
+           "deployment_headroom_mj", "projected_reserve_mj",
+           "modeled_mgu_k_peak_kw", "mgu_k_power_ceiling_kw",
+           "can_afford_aggressive", "energy_is_modeled":true,
+           "accounting": "SoC_next = SoC + recovered - deployed (net of a nominal lap), clipped" },
+         "telemetry_real": { mean_throttle, mean_brake, top_speed_kmh },  // REAL 2024 observation
          "data_quality": { status, quality_score },
          "gap_to_rival_s", "rival_role", "position", "drs", "our_speed_kmh",
          "lap_status", "rival_lap_status",
+         "provenance": { "REAL (2024 FastF1 observation)": [...],
+                         "MODELED (ChronoPace 2026, MODEL_ASSUMPTION)": [...],
+                         "INFERRED (probabilistic, from observable performance)": [...],
+                         "note": "REAL 2024 OBSERVATION + CHRONOPACE 2026 MODEL = ..." },
          "trace": [ { stage, detail } ]        // + STRATEGIC_RIVAL_SELECTED / _CHANGED
        } ]
      }
@@ -231,7 +250,11 @@ POST /api/v1/replay/historical
 
 GET  /api/v1/replay/historical/{race}/{lap}?driver=LEC&rival=PIA&seed=42&full_snapshot=false
 
-GET  /api/v1/replay/historical/{race}/{lap}/timeline?driver=LEC&max_ticks=400
+GET  /api/v1/replay/historical/{race}/{lap}/timeline?driver=LEC&max_ticks=400&debug=false
+  // ?debug=true adds "debug": [ { t, selected, raw_leader, switched, switch_reason,
+  //   dwell_ticks, candidates: [ { driver, relevance, gap_s, ahead,
+  //   closing_rate_s_per_lap, positions_apart, position, lap_status } ] } ]
+  //   -> reconstruct "t | PIA score | NOR score | selected | switch_reason"
   -> { race, lap, our_driver, focus_rival,
        tick_cadence_hz, total_ticks_this_lap, returned_ticks, downsample_step,
        summary: { dominant_driver, dominant_role, dominant_ahead, dominant_gap_s,
