@@ -179,7 +179,13 @@ def test_historical_response_never_exposes_ground_truth(offline_race):
     assert set(lap["rival_energy_inference"]) == {
         "label", "driver", "estimated_reserve_mj", "std_mj", "bucket",
         "distribution", "confidence", "n_observations", "p_defend",
+        # posterior health fields (Task 5)
+        "posterior_mean_mj", "posterior_std_mj",
+        "effective_sample_size", "evidence_quality", "posterior_health",
+        "baseline_ready", "energy_provenance",
     }
+    assert "rival_reference_soc_mj" in lap
+    assert lap["rival_reference_provenance"] == "CHRONOPACE_MODELED"
 
 
 def test_estimator_maintains_uncertainty_over_the_replay(offline_race):

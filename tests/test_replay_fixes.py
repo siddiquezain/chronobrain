@@ -305,6 +305,60 @@ class TestMonteCarloResponds:
 
 
 # ===========================================================================
+# Task 5 — posterior health + rival_reference_soc_mj in lap summaries
+# ===========================================================================
+class TestPosteriorHealthInLapSummary:
+    """lap_summary() must include posterior health fields and rival_reference_soc_mj."""
+
+    def _snap(self):
+        laps = []
+        soc = 6.5
+        for i in range(1, 9):
+            laps.append(NormalizedLap(
+                lap=i, total_laps=53, data_mode="REPLAY",
+                our_speed_kmh=330.0, our_soc_mj=soc, our_lap_start_soc_mj=soc,
+                our_lap_energy_deployed_mj=1.2,
+                gap_to_car_ahead_s=0.5,
+                rival_terminal_speed_kmh=320.0, rival_clipping_point_fraction=0.4,
+                rival_corner_exit_accel_g=1.6, rival_sector_delta_s=-0.1,
+                energy_is_modeled=True, raw_sample_count=300,
+            ))
+        return run_decision(ReplayProvider(laps), lap=8, config=DecisionConfig(seed=42))
+
+    def test_rival_energy_inference_has_posterior_health_fields(self):
+        snap = self._snap()
+        summary = H.lap_summary(snap)
+        rei = summary["rival_energy_inference"]
+        assert "effective_sample_size" in rei
+        assert "evidence_quality" in rei
+        assert "posterior_health" in rei
+        assert "baseline_ready" in rei
+        assert rei["energy_provenance"] == "INFERRED"
+        assert "posterior_mean_mj" in rei
+        assert "posterior_std_mj" in rei
+        assert rei["posterior_mean_mj"] == rei["estimated_reserve_mj"]
+
+    def test_rival_reference_soc_mj_present(self):
+        snap = self._snap()
+        summary = H.lap_summary(snap)
+        assert "rival_reference_soc_mj" in summary
+        assert summary["rival_reference_soc_mj"] is None   # not co-loaded in ego replay
+        assert summary["rival_reference_provenance"] == "CHRONOPACE_MODELED"
+
+    @_needs_fastf1
+    def test_real_monza_replay_has_posterior_health_fields(self):
+        res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=10, seed=42)
+        for L in res["laps"]:
+            rei = L["rival_energy_inference"]
+            assert "effective_sample_size" in rei, f"missing ESS on lap {L['lap']}"
+            assert "evidence_quality" in rei
+            assert "posterior_health" in rei
+            assert rei["energy_provenance"] == "INFERRED"
+            assert "rival_reference_soc_mj" in L
+            assert L["rival_reference_provenance"] == "CHRONOPACE_MODELED"
+
+
+# ===========================================================================
 # fixture
 # ===========================================================================
 @pytest.fixture(scope="module")

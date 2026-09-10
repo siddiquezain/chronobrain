@@ -140,7 +140,19 @@ def lap_summary(snap: DecisionSnapshot, nl: Optional[NormalizedLap] = None) -> d
             "confidence": r.confidence,
             "n_observations": r.n_observations,
             "p_defend": r.p_defend,
+            # posterior health fields
+            "posterior_mean_mj": r.mean_reserve_mj,
+            "posterior_std_mj": r.reserve_std_mj,
+            "effective_sample_size": r.effective_sample_size,
+            "evidence_quality": r.evidence_quality,
+            "posterior_health": r.posterior_health,
+            "baseline_ready": r.baseline_ready,
+            "energy_provenance": "INFERRED",
         },
+        # rival's own ChronoPace-modeled SoC — not loaded in the ego replay path
+        # ponytail: set None; populate if/when rival laps are co-loaded
+        "rival_reference_soc_mj": None,
+        "rival_reference_provenance": "CHRONOPACE_MODELED",
         "opportunity": {
             "recommended_strategy": o.recommended_strategy,
             "prefers_wait": o.prefers_wait,
