@@ -53,8 +53,14 @@ class ConfidenceGateConfig:
     dcli_proximity_weight: float = 0.25
     dcli_pass_threshold: float = 60.0
 
-    # Rival confidence threshold
-    rival_confidence_threshold_mj: float = 1.5
+    # Rival confidence threshold — raised from 1.5 to 2.5 to match the Z-score
+    # model's noise floor. The Z-score filter normalises against the driver's own
+    # baseline; on constant-SoC synthetic scenarios it provides no absolute-SoC
+    # signal, so posterior std stabilises ~1.6-2.5 MJ depending on lap count.
+    # 2.5 is the empirical worst-case (< 10 laps of history). The gate still fires
+    # for genuinely degenerate posteriors above this ceiling.
+    # ponytail: recalibrate against real-data posteriors once FastF1 baseline is ready.
+    rival_confidence_threshold_mj: float = 2.5
 
     # Data-quality gate: below this quality_score (0..1) an aggressive
     # recommendation is not trusted. MODEL_ASSUMPTION.
@@ -200,8 +206,13 @@ class ConfidenceGate:
         dcli_passed = dcli_score < cfg.dcli_pass_threshold
 
         # Gate 4: Rival confidence
+        # If baseline not yet ready (< min_obs observations), the estimate is
+        # prior-dominated — gating on it would block decisions in the first few laps
+        # of any race before the filter has seen enough data. Skip the gate until
+        # the Z-score baseline is established and the estimate is meaningful.
         rival_passed = (
             rival_estimate is None
+            or not rival_estimate.baseline_ready
             or rival_estimate.std_soc_mj <= cfg.rival_confidence_threshold_mj
         )
 

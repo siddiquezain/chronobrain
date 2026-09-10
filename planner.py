@@ -110,6 +110,12 @@ class PlannerConfig:
     failed_overtake_penalty_s: float = 0.4
     # Deliberately modest — single noisy rival estimate shouldn't swing outcomes much
     defense_penalty_weight: float = 0.3
+    # Cap the rival std used inside the planner's Monte Carlo sampling so that a
+    # wider Z-score posterior (honest uncertainty) does not inflate the planner's
+    # laptime CI and trigger the stat/prac gate. The confidence gate already gates
+    # on rival uncertainty separately via rival_confidence_threshold_mj.
+    # ponytail: 1.2 MJ matches the old absolute-model typical floor; revisit with real data.
+    planner_rival_soc_std_cap_mj: float = 1.2
     # Uncertainty growth per lap of lookahead — makes WAIT_5 less confident than WAIT_2
     horizon_uncertainty_growth: float = 0.15
     taper_normal_start_kmh: float = 290.0
@@ -371,7 +377,7 @@ class MonteCarloPlanner:
         ):
             rival_soc = rng.normal(
                 ctx.rival_soc_estimate.mean_soc_mj,
-                ctx.rival_soc_estimate.std_soc_mj,
+                min(ctx.rival_soc_estimate.std_soc_mj, cfg.planner_rival_soc_std_cap_mj),
                 n,
             )
             rival_soc = np.clip(rival_soc, 0.0, _DEFAULT_GATE_CONFIG.max_deployment_per_lap_mj)

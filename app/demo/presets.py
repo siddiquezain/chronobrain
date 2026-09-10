@@ -50,7 +50,7 @@ DEMO_PRESETS: Dict[str, DemoPreset] = {
         key="BETTER_FUTURE_OPPORTUNITY",
         label="Better future opportunity",
         description="Window is open now but energy recovers into a stronger one soon.",
-        scenario="C", lap=20,
+        scenario="C", lap=22,
         expectation="The Opportunity Horizon defers: WAIT_N rather than attacking now.",
     ),
     "LOW_CONFIDENCE_BAD_DATA": DemoPreset(
