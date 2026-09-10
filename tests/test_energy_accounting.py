@@ -230,3 +230,15 @@ def test_synthetic_mode_is_explicitly_synthetic():
     assert r["meta"]["data_mode"] == "SYNTHETIC"
     # synthetic SoC is the sim's own ground truth -> energy_is_modeled False
     assert r["energy"]["energy_is_modeled"] is False
+
+
+def test_energy_block_provenance_is_modeled():
+    from app.decision.engine import run_scenario
+    snap = run_scenario("B", seed=42, lap=10)
+    assert snap.energy.energy_provenance == "MODELED"
+
+
+def test_rival_block_provenance_is_inferred():
+    from app.decision.engine import run_scenario
+    snap = run_scenario("B", seed=42, lap=20)
+    assert snap.rival.energy_provenance == "INFERRED"

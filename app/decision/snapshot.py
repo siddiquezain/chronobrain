@@ -47,6 +47,14 @@ class EnergyBlock(BaseModel):
         None, description="Modeled peak MGU-K power this lap (kW) from the real throttle trace. MODEL_ASSUMPTION."
     )
     mgu_k_power_ceiling_kw: float = Field(350.0, description="Regulatory ceiling (VERIFIED_FIA)")
+    energy_provenance: str = Field(
+        "MODELED",
+        description=(
+            "MEASURED: directly from telemetry feed. "
+            "INFERRED: probabilistic hidden-state estimate. "
+            "MODELED: ChronoPace simulation/reconstruction (NOT actual FIA battery SoC)."
+        ),
+    )
 
 
 class RivalBlock(BaseModel):
@@ -76,6 +84,10 @@ class RivalBlock(BaseModel):
     baseline_ready: bool = Field(
         False,
         description="True once the Z-score baseline has min_obs observations."
+    )
+    energy_provenance: str = Field(
+        "INFERRED",
+        description="Always INFERRED for rival estimates — particle-filter posterior.",
     )
 
     # --- dynamic strategic-rival selection (additive; None for the fixed two-car

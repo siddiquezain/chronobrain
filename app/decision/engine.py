@@ -668,6 +668,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         net_swing_mj=getattr(e, "net_swing_mj", None),
         modeled_mgu_k_peak_kw=getattr(e, "modeled_mgu_k_peak_kw", None),
         mgu_k_power_ceiling_kw=getattr(e, "mgu_k_power_ceiling_kw", 350.0),
+        energy_provenance="MODELED",
     )
 
     sr = ctx.target_lap.strategic_rival
@@ -697,6 +698,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             evidence_quality=est.evidence_quality,
             posterior_health=est.posterior_health,
             baseline_ready=est.baseline_ready,
+            energy_provenance="INFERRED",
             **sr_fields,
         )
     else:
@@ -707,6 +709,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             freshness_laps=len(ctx.lap_history), p_defend=0.0,
             effective_sample_size=0.0, evidence_quality="insufficient",
             posterior_health="insufficient_data", baseline_ready=False,
+            energy_provenance="INFERRED",
             **sr_fields,
         )
 
