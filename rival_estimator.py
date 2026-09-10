@@ -300,6 +300,8 @@ class RivalStateEstimator:
 
         # Update baseline BEFORE using it for Z-scoring (strictly causal)
         self._baseline.update(observation)
+        # note: z_score uses stats including the current obs; self-inclusion bias = 1/n,
+        # acceptable at n >= min_obs_for_baseline (default 5).
 
         def log_gaussian(x, mu: np.ndarray, sigma: float) -> np.ndarray:
             return -0.5 * ((x - mu) / sigma) ** 2
@@ -320,7 +322,7 @@ class RivalStateEstimator:
             # heavily downweighted so the prior stays near-uniform.
             expected_sector_raw = -(soc_fraction - 0.5) * 0.3
             log_w = log_gaussian(
-                float(observation.sector_delta_s), expected_sector_raw, 0.5
+                float(observation.sector_delta_s), expected_sector_raw, cfg.z_fallback_noise
             ) * 0.1   # ponytail: downweight pre-baseline update; removes prior collapse
 
         log_w -= log_w.max()
