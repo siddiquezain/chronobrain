@@ -20,6 +20,9 @@ _needs = pytest.mark.skipif(not _HAVE_FASTF1, reason="fastf1 / cache unavailable
 # key must exist in app/replay/races.py HISTORICAL_RACES, or the test gracefully skips.
 _TEST_RACES = [
     ("2024_italian_gp",  [20, 25, 30, 35, 40, 45]),
+    ("2024_british_gp",  [20, 25, 30, 35, 40, 45, 50]),
+    ("2023_monaco_gp",   [20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75]),
+    ("2023_spanish_gp",  [20, 25, 30, 35, 40, 45, 50, 55]),
 ]
 
 _MIN_CHECKPOINTS = 3
@@ -88,12 +91,28 @@ def test_filter_vs_naive_per_race(race_key, checkpoint_laps):
         f"filter/naive={report.mae_mj / naive_mae:.2f}x"
     )
 
-    # Non-fatal threshold: filter must not be catastrophically worse than naive
+    # Absolute threshold: coarse prior — filter must be within 3.0 MJ MAE
+    assert report.mae_mj < 3.0, (
+        f"{race_key}: filter MAE {report.mae_mj:.3f} MJ exceeds 3.0 MJ honest threshold."
+    )
+    # Relative threshold: filter must not be catastrophically worse than naive
     assert report.mae_mj < naive_mae * 3.0, (
         f"{race_key}: filter MAE {report.mae_mj:.3f} MJ is "
         f"{report.mae_mj / naive_mae:.1f}x the naive baseline ({naive_mae:.3f} MJ). "
         f"Bias: {report.bias_mj:.3f} MJ. Observation model may not suit this circuit."
     )
+    # Persistence baseline must also be compared (not just fetched)
+    persistence_mae = bl["persistence"].mae_mj
+    print(f"  persistence_MAE={persistence_mae:.3f} MJ, filter/persistence={report.mae_mj / persistence_mae:.2f}x")
+    # Reference must be honestly labeled
+    assert "ChronoPace" in report.reference_description, (
+        f"reference_description must mention 'ChronoPace'. Got: {report.reference_description!r}"
+    )
+    # No FIA SoC labels in replay output
+    import json
+    blob = json.dumps(replay).lower()
+    for bad in ("ground_truth", "actual_soc", "hidden_soc", "real_soc", "rival_actual"):
+        assert bad not in blob, f"Found FIA-SoC label '{bad}' in {race_key} replay output"
 
 
 @_needs

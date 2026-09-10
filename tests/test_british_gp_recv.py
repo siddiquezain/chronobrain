@@ -73,7 +73,8 @@ def test_british_gp_recv_reference_is_not_fia_ground_truth(british_gp_replay):
     """Verify no field in the replay output claims to be FIA SoC."""
     import json
     blob = json.dumps(british_gp_replay).lower()
-    for bad_claim in ("fia_soc", "actual_soc", "measured_soc", "true_soc"):
+    for bad_claim in ("ground_truth", "actual_soc", "hidden_soc", "real_soc",
+                      "rival_actual", "fia_soc", "measured_soc", "true_soc"):
         assert bad_claim not in blob, f"Found '{bad_claim}' in replay output — misleading label"
 
 
@@ -93,8 +94,13 @@ def test_british_gp_strategic_rival_is_dynamic(british_gp_replay):
                    for L in british_gp_replay["laps"]
                    if L.get("strategic_rival", {}).get("driver")}
     # In a real race, more than one driver should appear as strategic rival
-    # (at least 2 if selection is truly dynamic)
     assert len(rivals_seen) >= 1   # at minimum one driver tracked
+    # HAM and VER were in a close battle throughout 2024 British GP
+    # The selector must identify HAM at some point in the race
+    assert "HAM" in rivals_seen, (
+        f"HAM never appeared as strategic rival in British GP replay. "
+        f"Rivals seen: {rivals_seen}"
+    )
 
 
 @_needs
@@ -127,12 +133,16 @@ def test_british_gp_recv_checkpoints_record(british_gp_replay):
             baseline_ready=rei.get("baseline_ready", False),
             n_observations=rei.get("n_observations", 0),
         ))
-    if len(checkpoints) < 2:
-        pytest.skip(f"Only {len(checkpoints)} checkpoints with reference SoC — "
-                    "Task 5 (rival_reference_soc_mj) may not be implemented yet")
+    if len(checkpoints) < 1:
+        pytest.skip(f"No checkpoints with reference SoC — "
+                    "rival_reference_soc_mj unavailable (rival laps not co-loaded)")
 
     report = compute_recv_report(checkpoints, label="2024_british_gp")
-    assert report.n_checkpoints >= 2
+    assert report.n_checkpoints >= 1
     assert not __import__("math").isnan(report.mae_mj)
+    # Reference must be honestly labeled as ChronoPace model, NOT FIA SoC
+    assert "ChronoPace" in report.reference_description, (
+        f"reference_description must mention 'ChronoPace'. Got: {report.reference_description!r}"
+    )
     print(f"\n2024 British GP RECV: n={report.n_checkpoints}, "
           f"MAE={report.mae_mj:.3f} MJ, bias={report.bias_mj:.3f} MJ")

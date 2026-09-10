@@ -197,6 +197,23 @@ def test_estimator_maintains_uncertainty_over_the_replay(offline_race):
     assert n_obs == list(range(1, 21))           # one observation per lap, censored
 
 
+def test_posterior_health_fields_are_populated(offline_race):
+    """Posterior health fields must carry meaningful values, not just keys."""
+    res = run_historical_replay(race_key="2024_italian_gp", start_lap=1, end_lap=10, seed=42,
+                                dynamic_rival=False)
+    for L in res["laps"]:
+        rei = L["rival_energy_inference"]
+        # numeric fields must be non-negative floats
+        assert isinstance(rei["posterior_mean_mj"], float) and rei["posterior_mean_mj"] >= 0.0
+        assert isinstance(rei["posterior_std_mj"], float) and rei["posterior_std_mj"] >= 0.0
+        assert isinstance(rei["effective_sample_size"], float) and rei["effective_sample_size"] >= 0.0
+        # categorical fields must be known values
+        assert rei["evidence_quality"] in ("insufficient", "weak", "moderate", "strong")
+        assert rei["posterior_health"] in ("healthy", "collapsed", "roughened", "insufficient_data")
+        assert isinstance(rei["baseline_ready"], bool)
+        assert rei["energy_provenance"] == "INFERRED"
+
+
 # ---------------------------------------------------------------------------
 # 9. missing fastf1 / cache -> clear error (not fabricated data)
 # ---------------------------------------------------------------------------
