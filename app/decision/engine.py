@@ -682,16 +682,21 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
 
     if ctx.rival is not None:
         r = ctx.rival
+        est = r.estimate
         rival_block = RivalBlock(
-            mean_reserve_mj=r.estimate.mean_soc_mj,
-            reserve_std_mj=r.estimate.std_soc_mj,
-            n_observations=r.estimate.n_observations,
+            mean_reserve_mj=est.mean_soc_mj,
+            reserve_std_mj=est.std_soc_mj,
+            n_observations=est.n_observations,
             confidence=r.confidence,
             estimate_uncertain=r.uncertain,
             bucket=r.bucket,
             distribution={k: round(v, 4) for k, v in r.distribution.items()},
             freshness_laps=r.freshness_laps,
             p_defend=r.p_defend,
+            effective_sample_size=est.effective_sample_size,
+            evidence_quality=est.evidence_quality,
+            posterior_health=est.posterior_health,
+            baseline_ready=est.baseline_ready,
             **sr_fields,
         )
     else:
@@ -700,6 +705,8 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             confidence=0.0, estimate_uncertain=True, bucket="MEDIUM",
             distribution={"low": 0.0, "medium": 1.0, "high": 0.0},
             freshness_laps=len(ctx.lap_history), p_defend=0.0,
+            effective_sample_size=0.0, evidence_quality="insufficient",
+            posterior_health="insufficient_data", baseline_ready=False,
             **sr_fields,
         )
 

@@ -201,21 +201,15 @@ def test_calibrated_filter_is_deterministic():
 # 7. Snapshot carries posterior health fields
 # ---------------------------------------------------------------------------
 def test_snapshot_rival_block_has_posterior_metadata():
-    """run_scenario() must produce a snapshot whose RivalBlock has health fields."""
+    """RivalBlock in the snapshot must carry posterior health fields from RivalSocEstimate."""
     from app.decision.engine import run_scenario
     snap = run_scenario("B", seed=42, lap=20)
     rb = snap.rival
-    # These fields will be added in Task 2 — this test is a pre-check that wiring works
-    # For now just verify estimate fields exist on the estimator
-    from rival_estimator import RivalStateEstimator
-    est = RivalStateEstimator(seed=42)
-    from telemetry_simulator import TelemetrySimulator
-    sim = TelemetrySimulator(scenario="B", seed=42)
-    for _ in range(10):
-        _, obs = sim.next_lap()
-        est.predict(); est.update(obs)
-    result = est.estimate()
-    assert hasattr(result, "effective_sample_size")
-    assert hasattr(result, "evidence_quality")
-    assert hasattr(result, "posterior_health")
-    assert hasattr(result, "baseline_ready")
+    assert hasattr(rb, "effective_sample_size")
+    assert hasattr(rb, "evidence_quality")
+    assert hasattr(rb, "posterior_health")
+    assert hasattr(rb, "baseline_ready")
+    assert rb.evidence_quality in ("insufficient", "weak", "moderate", "strong")
+    assert rb.posterior_health in ("healthy", "collapsed", "roughened", "insufficient_data")
+    assert isinstance(rb.effective_sample_size, float)
+    assert isinstance(rb.baseline_ready, bool)

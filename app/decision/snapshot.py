@@ -60,6 +60,24 @@ class RivalBlock(BaseModel):
     freshness_laps: int = Field(0, ge=0, description="Laps since the last usable rival observation")
     p_defend: float = Field(0.0, ge=0.0, le=1.0, description="Deterministic P(rival actively defends)")
 
+    # --- posterior health (from RivalSocEstimate) ---
+    effective_sample_size: float = Field(
+        0.0, ge=0.0,
+        description="Particle ESS: 1/Σw². Low = collapsed/degenerate posterior."
+    )
+    evidence_quality: str = Field(
+        "insufficient",
+        description="insufficient | weak | moderate | strong — NOT an accuracy claim."
+    )
+    posterior_health: str = Field(
+        "unknown",
+        description="healthy | collapsed | roughened | insufficient_data"
+    )
+    baseline_ready: bool = Field(
+        False,
+        description="True once the Z-score baseline has min_obs observations."
+    )
+
     # --- dynamic strategic-rival selection (additive; None for the fixed two-car
     #     replay and the synthetic path — the energy estimate above is then for the
     #     single configured rival exactly as before) ---
