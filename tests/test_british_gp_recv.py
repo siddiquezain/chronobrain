@@ -94,7 +94,10 @@ def test_british_gp_strategic_rival_is_dynamic(british_gp_replay):
                    for L in british_gp_replay["laps"]
                    if L.get("strategic_rival", {}).get("driver")}
     # In a real race, more than one driver should appear as strategic rival
-    assert len(rivals_seen) >= 1   # at minimum one driver tracked
+    assert len(rivals_seen) >= 2, (
+        f"Only 1 rival seen across {len(british_gp_replay['laps'])} laps — "
+        "selector appears static, not dynamic. Rivals: {rivals_seen}"
+    )
     # HAM and VER were in a close battle throughout 2024 British GP
     # The selector must identify HAM at some point in the race
     assert "HAM" in rivals_seen, (
