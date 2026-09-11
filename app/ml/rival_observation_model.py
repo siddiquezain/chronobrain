@@ -168,7 +168,7 @@ class RivalObservationModel:
         y = np.array([label_map[int(c)] for c in raw_labels])
 
         # --- Train calibrated classifier ---
-        n_cv = min(5, len(np.unique(y)))
+        n_cv = max(2, min(5, len(np.unique(y))))
         base = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=1)
         clf = CalibratedClassifierCV(base, cv=n_cv, method="isotonic")
         clf.fit(X, y)
