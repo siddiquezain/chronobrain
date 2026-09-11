@@ -218,6 +218,7 @@ def load_replay(
     # cumulative-lap-time fallback for who-leads when Position is missing.
     our_status = _lap_status_by_lap(ses, our_driver)
     rival_status = _lap_status_by_lap(ses, rival_driver)
+    rival_compound_map = _compound_by_lap(ses, rival_driver)
     our_pos = _positions_by_lap(ses, our_driver)
     rival_pos = _positions_by_lap(ses, rival_driver)
     our_cum = _cumulative_laptime(ses, our_driver)
@@ -286,6 +287,7 @@ def load_replay(
             lap_status=o_status,
             rival_lap_status=r_status,
             source_detail=src,
+            rival_compound=rival_compound_map.get(ln),
         )
         prev_soc = nl.our_soc_mj
         out.append(nl)
@@ -375,6 +377,7 @@ def _load_replay_dynamic(
         raise FastF1Unavailable(f"no laps for {our_driver!r} in {year} {ev_name} {session}")
 
     status_by_driver = {d: _lap_status_by_lap(ses, d) for d in all_drivers}
+    compound_by_driver = {d: _compound_by_lap(ses, d) for d in all_drivers}
     pos_by_driver = {d: _positions_by_lap(ses, d) for d in all_drivers}
     cum_by_driver = {d: _cumulative_laptime(ses, d) for d in all_drivers}
     laptime_by_driver = {d: _laptimes_by_lap(ses, d) for d in all_drivers}
@@ -485,6 +488,7 @@ def _load_replay_dynamic(
             rival_lap_status=r_status,
             strategic_rival=sri,
             source_detail=src,
+            rival_compound=compound_by_driver.get(rival_drv, {}).get(ln),
         )
         prev_soc = nl.our_soc_mj
         out.append(nl)
@@ -595,6 +599,18 @@ def _lap_status_by_lap(session, driver: str) -> Dict[int, str]:
             out[ln] = "invalid_for_energy_inference"
         else:
             out[ln] = "racing"
+    return out
+
+
+def _compound_by_lap(session, driver: str) -> Dict[int, str]:
+    """Per-lap tyre compound string (e.g. 'SOFT', 'MEDIUM', 'HARD'). Empty dict when unavailable."""
+    laps = session.laps.pick_drivers(driver) if hasattr(session.laps, "pick_drivers") else session.laps.pick_driver(driver)
+    out: Dict[int, str] = {}
+    for _, lap in laps.iterlaps():
+        ln = int(lap["LapNumber"])
+        c = lap.get("Compound")
+        if c is not None and not _is_nan(c):
+            out[ln] = str(c).upper()
     return out
 
 
