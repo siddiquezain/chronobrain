@@ -119,3 +119,84 @@ class RivalObservationModel:
             meta.get("label_scheme", "unknown"),
         )
         return cls(clf, meta)
+
+    @classmethod
+    def train(cls, X: np.ndarray, save: bool = True) -> "RivalObservationModel":
+        """
+        Train on observable feature matrix X (n_samples, 7).
+
+        Labels are generated via KMeans(3) weak supervision — behavioral clusters
+        of observable telemetry patterns, NOT true rival SoC. This is a proxy-label
+        approach. See module docstring.
+
+        X must contain only features from RIVAL_OBS_FEATURE_NAMES.
+        our_soc_mj and any internal energy field must never appear in X.
+
+        Args:
+            X: Feature matrix shape (n_samples, 7). All columns from RIVAL_OBS_FEATURE_NAMES.
+            save: If True, persist model + metadata to app/ml/models/.
+
+        Returns:
+            Fitted RivalObservationModel instance.
+        """
+        import hashlib
+        from datetime import datetime, timezone
+
+        import joblib
+        import sklearn
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.cluster import KMeans
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.model_selection import cross_val_score
+
+        if X.shape[1] != len(RIVAL_OBS_FEATURE_NAMES):
+            raise ValueError(
+                f"Expected {len(RIVAL_OBS_FEATURE_NAMES)} features, got {X.shape[1]}. "
+                f"Feature names: {RIVAL_OBS_FEATURE_NAMES}"
+            )
+
+        # --- Weak label generation ---
+        # KMeans(3) clusters observable behavioral patterns into energy-management regimes.
+        # Cluster with the lowest mean speed Z → LOW energy behavior (slow terminal speed).
+        # ponytail: KMeans labels are proxies — no true SoC ground truth exists in FastF1.
+        km = KMeans(n_clusters=3, random_state=42, n_init=10)
+        raw_labels = km.fit_predict(X)
+        speed_z_col = RIVAL_OBS_FEATURE_NAMES.index("z_terminal_speed")
+        centers = km.cluster_centers_
+        order = np.argsort(centers[:, speed_z_col])  # ascending: LOW → MID → HIGH
+        label_map = {int(order[i]): label for i, label in enumerate(ENERGY_LABELS)}
+        y = np.array([label_map[int(c)] for c in raw_labels])
+
+        # --- Train calibrated classifier ---
+        n_cv = min(5, len(np.unique(y)))
+        base = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=1)
+        clf = CalibratedClassifierCV(base, cv=n_cv, method="isotonic")
+        clf.fit(X, y)
+
+        # Cross-val on base for diagnostic logging only
+        cv_acc = cross_val_score(base, X, y, cv=n_cv, scoring="accuracy")
+        logger.info(
+            "Rival obs RF CV accuracy: %.3f ± %.3f (n=%d)", cv_acc.mean(), cv_acc.std(), len(X)
+        )
+
+        meta = {
+            "trained_at": datetime.now(timezone.utc).isoformat(),
+            "sklearn_version": sklearn.__version__,
+            "feature_names": RIVAL_OBS_FEATURE_NAMES,
+            "n_features": len(RIVAL_OBS_FEATURE_NAMES),
+            "label_scheme": "KMeans(3) weak supervision — LOW/MEDIUM/HIGH behavioral clusters",
+            "ground_truth": "NONE — proxy labels from observable telemetry clustering only",
+            "leakage_check": "our_soc_mj excluded by design; enforced by RIVAL_OBS_FEATURE_NAMES",
+            "n_samples": int(X.shape[0]),
+            "dataset_hash": hashlib.sha256(np.ascontiguousarray(X).tobytes()).hexdigest()[:16],
+            "cv_accuracy_mean": round(float(cv_acc.mean()), 4),
+            "cv_accuracy_std": round(float(cv_acc.std()), 4),
+        }
+
+        if save:
+            _MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump(clf, _MODEL_PATH)
+            _META_PATH.write_text(json.dumps(meta, indent=2))
+            logger.info("Rival obs model saved to %s", _MODEL_PATH)
+
+        return cls(clf, meta)

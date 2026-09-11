@@ -82,3 +82,52 @@ def test_load_or_none_rejects_feature_count_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_META_PATH", tmp_path / "bad.meta.json")
     result = mod.RivalObservationModel.load_or_none()
     assert result is None
+
+
+def test_train_produces_model_with_correct_feature_count():
+    """train() on synthetic feature matrix → model accepts 7-feature vectors."""
+    import numpy as np
+    from app.ml.rival_observation_model import RivalObservationModel, RIVAL_OBS_FEATURE_NAMES
+
+    rng = np.random.default_rng(0)
+    # 150 samples: 3 clear clusters (low, neutral, high speed Z)
+    low  = rng.normal([-1.5, 0.2, -0.5, 1.2, -0.3, 3, 2], 0.3, (50, 7))
+    mid  = rng.normal([ 0.0, 0.0,  0.0, 0.0,  0.0, 0, 0], 0.3, (50, 7))
+    high = rng.normal([ 1.5,-0.2,  0.5,-1.2,  0.3, 0, 0], 0.3, (50, 7))
+    X = np.vstack([low, mid, high])
+
+    model = RivalObservationModel.train(X, save=False)
+    assert model is not None
+
+    ev = model.predict_evidence(np.zeros((1, 7)))
+    assert set(ev.keys()) == {"LOW", "MEDIUM", "HIGH"}
+    assert abs(sum(ev.values()) - 1.0) < 1e-5
+
+
+def test_train_raises_on_wrong_feature_count():
+    import numpy as np
+    from app.ml.rival_observation_model import RivalObservationModel
+    import pytest
+    X = np.zeros((50, 5))  # wrong: 5 features instead of 7
+    with pytest.raises(ValueError, match="Expected 7"):
+        RivalObservationModel.train(X, save=False)
+
+
+def test_train_metadata_documents_no_ground_truth():
+    """Confirm train() metadata records the proxy-label disclosure."""
+    import numpy as np
+    from app.ml.rival_observation_model import RivalObservationModel
+
+    rng = np.random.default_rng(1)
+    X = np.vstack([
+        rng.normal([-1.5, 0.2, -0.5, 1.2, -0.3, 3, 2], 0.3, (50, 7)),
+        rng.normal([0.0]*7, 0.3, (50, 7)),
+        rng.normal([1.5,-0.2, 0.5,-1.2, 0.3, 0, 0], 0.3, (50, 7)),
+    ])
+    model = RivalObservationModel.train(X, save=False)
+    info = model.model_info()
+    assert "NONE" in info.get("ground_truth", ""), \
+        f"Expected 'NONE' in ground_truth, got: {info.get('ground_truth')}"
+    leakage = info.get("leakage_check", "")
+    assert "our_soc_mj" in leakage.lower() or "excluded" in leakage.lower(), \
+        f"Expected leakage_check to mention exclusion, got: {leakage}"
