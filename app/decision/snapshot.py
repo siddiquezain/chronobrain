@@ -149,8 +149,27 @@ class OpportunityStrategy(BaseModel):
     energy_spent_mj: float = 0.0
     current_opportunity_value: float = 0.0
     future_opportunity_value: float = 0.0
-    energy_opportunity_cost: float = 0.0
+    energy_opportunity_cost: float = Field(
+        0.0, description="Function of THIS strategy's own spent/end_soc only — "
+        "never another strategy's opportunity value (no double-counting)."
+    )
     strategic_value: float = 0.0
+    attack_completion_probability: Optional[float] = Field(
+        None, description="P(the completion-lap overtake succeeds), from a per-iteration "
+        "rival-SoC draw. None if this strategy never reaches a completion lap or no "
+        "rival estimate was available."
+    )
+    attack_completion_probability_std: Optional[float] = Field(
+        None, description="Std of the per-iteration completion probability — the "
+        "undiluted signal of rival uncertainty (scales with rival std_soc_mj)."
+    )
+    utility_std: float = Field(
+        0.0, description="Std of strategic_value across iterations — widens with rival "
+        "uncertainty even when the mean strategic_value does not."
+    )
+    downside_probability: float = Field(
+        0.0, description="P(this strategy's strategic_value < HOLD's). 0.0 for HOLD."
+    )
 
 
 class OpportunityBlock(BaseModel):
@@ -172,7 +191,16 @@ class MonteCarloMode(BaseModel):
     mode: str
     mean_laptime_delta_s: float
     std_laptime_delta_s: float
-    overtake_probability: float
+    overtake_probability: float = Field(
+        ..., description="LEGACY NAME, kept for API compatibility: mean(samples < 0) "
+        "= P(this mode nets faster than BALANCED), NOT literally P(overtake completes). "
+        "~0.5 for CONSERVE/BALANCED (no attempt modelled). Use "
+        "attack_completion_probability for the correctly-named metric."
+    )
+    attack_completion_probability: Optional[float] = Field(
+        None, description="P(the simulated overtake attempt itself succeeds). None for "
+        "CONSERVE/BALANCED (no attempt is modelled)."
+    )
     sharpe_ratio: float
     energy_cost_mj: float
 
@@ -182,6 +210,13 @@ class MonteCarloBlock(BaseModel):
     seed: int
     recommended_mode: str
     ranked_modes: List[MonteCarloMode]
+    runner_up_mode: Optional[str] = Field(
+        None, description="Second-ranked legal mode, if any — counterfactual companion "
+        "to recommended_mode."
+    )
+    mode_value_gap_s: float = Field(
+        0.0, description="How much better recommended_mode is than runner_up_mode (s)."
+    )
 
 
 class ComplianceCheck(BaseModel):

@@ -54,8 +54,13 @@ class FeasibilityInput:
     reserve_floor_mj: float
     laps_remaining: int
     # MODEL_ASSUMPTION: SoC a non-attacking car recovers per lap while it waits.
+    # Mirrors planner.PlannerConfig.harvest_per_lap_mj — that field is the
+    # canonical home (the Opportunity Horizon reads it from there); this default
+    # is kept numerically in sync manually since this dataclass has no config
+    # wiring of its own in _run_feasibility().
     harvest_per_lap_mj: float = 0.3
     # MODEL_ASSUMPTION: energy an aggressive attack sequence needs above the floor.
+    # Mirrors planner.PlannerConfig.attack_cost_mj — same note as above.
     attack_cost_mj: float = 1.6
 
 

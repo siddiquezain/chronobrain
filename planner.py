@@ -140,6 +140,15 @@ class PlannerConfig:
     # Value (s) of PUSH_MODE when it is actually defending a car within range.
     defensive_push_value_s: float = 0.3
 
+    # --- shared energy-economics constants (canonical home; MODEL_ASSUMPTION) ---
+    # Mirrors app.decision.actions.FeasibilityInput.harvest_per_lap_mj /
+    # attack_cost_mj. Kept in sync manually (both are illustrative energy-policy
+    # constants, not measured) — the Opportunity Horizon reads THESE fields rather
+    # than defining its own separate numbers, so there is exactly one place each
+    # concept is defined for the Stage-2/Horizon boundary.
+    harvest_per_lap_mj: float = 0.3
+    attack_cost_mj: float = 1.6
+
 
 @dataclass
 class PlanningContext:
@@ -176,7 +185,21 @@ class ModeProjection(BaseModel):
         ..., description="Mean laptime delta vs BALANCED baseline (s). Negative = faster."
     )
     std_laptime_delta_s: float
-    overtake_probability: float = Field(..., ge=0.0, le=1.0)
+    overtake_probability: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="LEGACY NAME, kept for API compatibility: mean(samples < 0) — "
+        "P(this mode nets faster than the BALANCED baseline), NOT literally "
+        "P(overtake completes). For CONSERVE/BALANCED (no overtake attempt) this "
+        "is ~0.5 from Gaussian noise alone. Use attack_completion_probability for "
+        "the semantically-correct metric on modes that actually attempt a pass.",
+    )
+    attack_completion_probability: Optional[float] = Field(
+        None, ge=0.0, le=1.0,
+        description="P(the simulated overtake attempt itself succeeds) — mean of "
+        "the per-iteration Bernoulli success draw. None for CONSERVE/BALANCED "
+        "(no attempt is modelled). This is the correctly-named replacement metric; "
+        "overtake_probability is retained unchanged for backward compatibility.",
+    )
     sharpe_ratio: float = Field(
         ..., description="Risk-adjusted metric. Capped at ±999 when variance near zero."
     )
@@ -189,6 +212,16 @@ class PlannerResult(BaseModel):
         ..., description="Legal modes ranked best-first (lowest mean delta)"
     )
     recommended_mode: DeploymentMode
+    runner_up_mode: Optional[DeploymentMode] = Field(
+        None, description="Second-ranked legal mode, if any — counterfactual companion "
+        "to recommended_mode (mirrors OpportunityBlock.foregone_strategy at the "
+        "Horizon layer)."
+    )
+    mode_value_gap_s: float = Field(
+        0.0, description="mean_laptime_delta_s(runner_up) - mean_laptime_delta_s(recommended) "
+        "— how much better the recommended mode is than the best alternative (s). "
+        "Always >= 0 since modes are ranked best-first."
+    )
     n_iterations: int
 
 
@@ -243,7 +276,7 @@ class MonteCarloPlanner:
             dyn = self.dynamics[mode]
             rng = streams[mode]
 
-            samples = self._simulate_mode(mode, dyn, ctx, rng)
+            samples, completion_prob = self._simulate_mode(mode, dyn, ctx, rng)
             self._raw_samples[(run_id, mode)] = samples
 
             mean = float(np.mean(samples))
@@ -261,6 +294,9 @@ class MonteCarloPlanner:
                     mean_laptime_delta_s=round(mean, 6),
                     std_laptime_delta_s=round(std, 6),
                     overtake_probability=round(float(np.mean(samples < 0)), 4),
+                    attack_completion_probability=(
+                        round(completion_prob, 4) if completion_prob is not None else None
+                    ),
                     sharpe_ratio=round(sharpe, 4),
                     energy_cost_mj=dyn.energy_cost_mj,
                 )
@@ -271,11 +307,18 @@ class MonteCarloPlanner:
         recommended = (
             projections[0].mode if projections else DeploymentMode.BALANCED_MODE
         )
+        runner_up = projections[1].mode if len(projections) > 1 else None
+        value_gap = (
+            round(projections[1].mean_laptime_delta_s - projections[0].mean_laptime_delta_s, 6)
+            if len(projections) > 1 else 0.0
+        )
 
         return PlannerResult(
             run_id=run_id,
             ranked_modes=projections,
             recommended_mode=recommended,
+            runner_up_mode=runner_up,
+            mode_value_gap_s=value_gap,
             n_iterations=cfg.n_iterations,
         )
 
@@ -297,7 +340,7 @@ class MonteCarloPlanner:
         dyn: ModeDynamics,
         ctx: PlanningContext,
         rng: np.random.Generator,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, Optional[float]]:
         """
         Simulate n_iterations laptime draws for one mode.
 
@@ -318,6 +361,7 @@ class MonteCarloPlanner:
         n = cfg.n_iterations
 
         samples = rng.normal(dyn.mean_laptime_delta_s, dyn.std_laptime_delta_s, n)
+        completion_prob: Optional[float] = None
 
         target_ahead = self._range_factor(
             ctx.gap_to_car_ahead_s, cfg.in_range_plateau_s, cfg.target_range_s
@@ -335,6 +379,9 @@ class MonteCarloPlanner:
                 eff_prob = eff_prob * (0.5 + 0.5 * float(np.clip(ctx.opportunity_strength, 0.0, 1.0)))
             eff_prob = eff_prob * payoff  # no car in range -> payoff cannot be realised
             success = rng.random(n) < eff_prob
+            # attack_completion_probability: the correctly-named metric — mean of
+            # the actual per-iteration success draw, not "P(net faster than 0)".
+            completion_prob = float(np.mean(success))
             samples -= success * cfg.overtake_gap_max_bonus
             samples += (~success) * cfg.failed_overtake_penalty_s * (eff_prob > 0).astype(float)
 
@@ -353,7 +400,7 @@ class MonteCarloPlanner:
         if mode == DeploymentMode.PUSH_MODE and defending > 0.0:
             samples = samples - defending * cfg.defensive_push_value_s
 
-        return samples
+        return samples, completion_prob
 
     def _effective_overtake_prob(
         self,

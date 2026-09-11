@@ -422,6 +422,9 @@ def _run_horizon(ctx: DecisionContext) -> None:
         overtake_reward_s=cfg.overtake_reward_s,
         future_window_bias=cfg.future_window_bias_s if improving else 0.0,
         restrict_to_delays=restrict,
+        # same deterministic P(rival defends) scalar Stage 2 already receives —
+        # keeps the two Monte Carlo layers' rival-uncertainty inputs compatible.
+        p_defend=ctx.rival.p_defend if ctx.rival else None,
     )
     ctx.opportunity_uncertain = _opportunity_uncertain(ctx)
 
@@ -740,6 +743,10 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
             future_opportunity_value=s.future_opportunity_value,
             energy_opportunity_cost=s.energy_opportunity_cost,
             strategic_value=s.strategic_value,
+            attack_completion_probability=s.attack_completion_probability,
+            attack_completion_probability_std=s.attack_completion_probability_std,
+            utility_std=s.utility_std,
+            downside_probability=s.downside_probability,
         )
         for s in h.ranked_strategies
     ]
@@ -771,11 +778,14 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
                 mean_laptime_delta_s=m.mean_laptime_delta_s,
                 std_laptime_delta_s=m.std_laptime_delta_s,
                 overtake_probability=m.overtake_probability,
+                attack_completion_probability=m.attack_completion_probability,
                 sharpe_ratio=m.sharpe_ratio,
                 energy_cost_mj=m.energy_cost_mj,
             )
             for m in pr.ranked_modes
         ],
+        runner_up_mode=(pr.runner_up_mode.value if pr.runner_up_mode else None),
+        mode_value_gap_s=pr.mode_value_gap_s,
     )
 
     compliance_block = _compliance_block(ctx)
