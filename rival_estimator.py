@@ -367,13 +367,46 @@ class RivalStateEstimator:
         if self._baseline.is_ready:
             # Z-score model: normalize against rival's own running distribution
             z_sp, z_cl, z_ac, z_se = self._baseline.z_score(observation)
-            noise = cfg.z_observation_noise
-            log_w = (
-                log_gaussian(z_sp, cfg.expected_speed_z(soc_fraction), noise)
-                + log_gaussian(z_cl, cfg.expected_clip_z(soc_fraction), noise)
-                + log_gaussian(z_ac, cfg.expected_accel_z(soc_fraction), noise)
-                + log_gaussian(z_se, cfg.expected_sector_z(soc_fraction), noise)
-            )
+            # Update temporal tracker after z_scores are available (causal)
+            self._temporal.update(z_sp, z_se)
+
+            if self._obs_model is not None:
+                # ML path: energy-state evidence → piecewise bucket particle weights
+                features = np.array([[
+                    z_sp, z_cl, z_ac, z_se,
+                    self._temporal.speed_slope,
+                    float(self._temporal.speed_persistence),
+                    float(self._temporal.sector_persistence),
+                ]])
+                evidence = self._obs_model.predict_evidence(features)
+                # Map each particle's SoC → bucket probability
+                # ponytail: piecewise constant likelihood; bucket-boundary discontinuities
+                #   absorbed by roughening + n_particles=1000. Upgrade to soft-bucket
+                #   blending if posterior shows systematic boundary artifacts.
+                log_w = np.log(np.clip(
+                    np.where(
+                        soc < cfg.bucket_low_mj,
+                        evidence.get("LOW", 1/3),
+                        np.where(
+                            soc < cfg.bucket_high_mj,
+                            evidence.get("MEDIUM", 1/3),
+                            evidence.get("HIGH", 1/3),
+                        ),
+                    ),
+                    1e-10,
+                    None,
+                ))
+                self._ml_active = True
+            else:
+                # Gaussian fallback: existing hand-coded Z-score observation model
+                noise = cfg.z_observation_noise
+                log_w = (
+                    log_gaussian(z_sp, cfg.expected_speed_z(soc_fraction), noise)
+                    + log_gaussian(z_cl, cfg.expected_clip_z(soc_fraction), noise)
+                    + log_gaussian(z_ac, cfg.expected_accel_z(soc_fraction), noise)
+                    + log_gaussian(z_se, cfg.expected_sector_z(soc_fraction), noise)
+                )
+                self._ml_active = False
         else:
             # Not enough history to Z-score: uninformative fallback.
             # Use sector delta (already a relative signal) with wide noise,
