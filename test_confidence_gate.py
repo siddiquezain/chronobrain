@@ -147,7 +147,7 @@ class TestRivalConfidence:
         gate = make_all_legal_gate()
         result = planner.plan(gate)
         cg = ConfidenceGate()
-        rival = RivalSocEstimate(mean_soc_mj=5.0, std_soc_mj=2.0, n_observations=3)
+        rival = RivalSocEstimate(mean_soc_mj=5.0, std_soc_mj=3.0, n_observations=5, baseline_ready=True)
         cg_result = cg.evaluate(result, rival_estimate=rival, planner=planner)
         assert cg_result.rival_confidence_passed is False
 
@@ -156,7 +156,7 @@ class TestRivalConfidence:
         gate = make_all_legal_gate()
         result = planner.plan(gate)
         cg = ConfidenceGate()
-        rival = RivalSocEstimate(mean_soc_mj=5.0, std_soc_mj=0.5, n_observations=20)
+        rival = RivalSocEstimate(mean_soc_mj=5.0, std_soc_mj=0.5, n_observations=20, baseline_ready=True)
         cg_result = cg.evaluate(result, rival_estimate=rival, planner=planner)
         assert cg_result.rival_confidence_passed is True
 
