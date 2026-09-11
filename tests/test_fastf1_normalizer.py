@@ -119,7 +119,7 @@ _MODES = {
 }
 
 
-def test_condense_lap_rival_compound_threaded():
+def test_condense_lap_rival_compound_round_trip():
     """rival_compound kwarg on condense_lap ends up on NormalizedLap."""
     from app.data.normalizer import condense_lap
     from app.data.samples import TelemetrySample
@@ -136,6 +136,7 @@ def test_condense_lap_rival_compound_threaded():
 
 
 def test_condense_lap_rival_compound_defaults_none():
+    """rival_compound defaults to None when not provided."""
     from app.data.normalizer import condense_lap
     from app.data.samples import TelemetrySample
 
