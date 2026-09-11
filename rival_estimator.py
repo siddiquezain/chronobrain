@@ -33,6 +33,42 @@ _DEFAULT_GATE_CONFIG = GateConfig()
 
 
 @dataclass
+class _CompoundAccumulator:
+    """Online statistics for one tyre-compound stratum inside RivalObservationBaseline."""
+    n: int = 0
+    _sum_sp: float = 0.0;  _sum_sq_sp: float = 0.0
+    _sum_cl: float = 0.0;  _sum_sq_cl: float = 0.0
+    _sum_ac: float = 0.0;  _sum_sq_ac: float = 0.0
+    _sum_se: float = 0.0;  _sum_sq_se: float = 0.0
+
+    def add(self, sp: float, cl: float, ac: float, se: float) -> None:
+        self.n += 1
+        self._sum_sp += sp;  self._sum_sq_sp += sp * sp
+        self._sum_cl += cl;  self._sum_sq_cl += cl * cl
+        self._sum_ac += ac;  self._sum_sq_ac += ac * ac
+        self._sum_se += se;  self._sum_sq_se += se * se
+
+    def _stat(self, s: float, sq: float) -> tuple:
+        if self.n < 2:
+            return (s / max(1, self.n), 1.0)
+        mean = s / self.n
+        var = max(0.0, sq / self.n - mean * mean) * self.n / (self.n - 1)
+        return (mean, max(math.sqrt(var), 1e-4))
+
+    def z_scores(self, sp: float, cl: float, ac: float, se: float) -> tuple:
+        ms, ss = self._stat(self._sum_sp, self._sum_sq_sp)
+        mc, sc = self._stat(self._sum_cl, self._sum_sq_cl)
+        ma, sa = self._stat(self._sum_ac, self._sum_sq_ac)
+        me, se2 = self._stat(self._sum_se, self._sum_sq_se)
+        return (
+            (sp - ms) / ss,
+            (cl - mc) / sc,
+            (ac - ma) / sa,
+            (se - me) / se2,
+        )
+
+
+@dataclass
 class RivalObservationBaseline:
     """
     Per-driver causal running statistics for the 4 particle-filter observables.
@@ -49,6 +85,7 @@ class RivalObservationBaseline:
     _sum_sq_accel: float = field(default=0.0, init=False, repr=False)
     _sum_sector: float = field(default=0.0, init=False, repr=False)
     _sum_sq_sector: float = field(default=0.0, init=False, repr=False)
+    _cpd: dict = field(default_factory=dict, init=False, repr=False)
 
     @property
     def n(self) -> int:
@@ -97,7 +134,7 @@ class RivalObservationBaseline:
     def std_sector(self) -> float:
         return self._stats(self._sum_sector, self._sum_sq_sector)[1]
 
-    def update(self, obs) -> None:
+    def update(self, obs, compound: str = "UNKNOWN") -> None:
         """Fold one observation into running stats. Call BEFORE z_score (causal)."""
         self._n += 1
         sp = float(obs.terminal_speed_kmh)
@@ -109,13 +146,34 @@ class RivalObservationBaseline:
         self._sum_accel += ac; self._sum_sq_accel += ac * ac
         self._sum_sector += se; self._sum_sq_sector += se * se
 
-    def z_score(self, obs) -> tuple:
-        """Return (z_speed, z_clip, z_accel, z_sector). Only call when is_ready."""
+        # Compound-specific accumulator
+        key = compound.upper()
+        if key not in self._cpd:
+            self._cpd[key] = _CompoundAccumulator()
+        self._cpd[key].add(sp, cl, ac, se)
+
+    def z_score(self, obs, compound: str = "UNKNOWN") -> tuple:
+        """Return (z_speed, z_clip, z_accel, z_sector). Only call when is_ready.
+
+        Uses compound-specific baseline when that compound has >= min_obs observations.
+        Falls back to the pooled (all-compound) baseline otherwise.
+        """
+        sp = float(obs.terminal_speed_kmh)
+        cl = float(obs.clipping_point_fraction)
+        ac = float(obs.corner_exit_accel_g)
+        se = float(obs.sector_delta_s)
+
+        key = compound.upper()
+        acc = self._cpd.get(key)
+        if acc is not None and acc.n >= self.min_obs:
+            return acc.z_scores(sp, cl, ac, se)
+
+        # Pooled fallback (existing behaviour)
         return (
-            (float(obs.terminal_speed_kmh) - self.mean_speed) / self.std_speed,
-            (float(obs.clipping_point_fraction) - self.mean_clip) / self.std_clip,
-            (float(obs.corner_exit_accel_g) - self.mean_accel) / self.std_accel,
-            (float(obs.sector_delta_s) - self.mean_sector) / self.std_sector,
+            (sp - self.mean_speed) / self.std_speed,
+            (cl - self.mean_clip) / self.std_clip,
+            (ac - self.mean_accel) / self.std_accel,
+            (se - self.mean_sector) / self.std_sector,
         )
 
 
@@ -339,7 +397,7 @@ class RivalStateEstimator:
             cfg.soc_max_mj,
         )
 
-    def update(self, observation) -> None:
+    def update(self, observation, compound: str = "UNKNOWN") -> None:
         """
         Reweight particles by Gaussian likelihood of observing the given kinematics.
 
@@ -357,7 +415,7 @@ class RivalStateEstimator:
         soc_fraction = soc / cfg.soc_max_mj
 
         # Update baseline BEFORE using it for Z-scoring (strictly causal)
-        self._baseline.update(observation)
+        self._baseline.update(observation, compound=compound)
         # note: z_score uses stats including the current obs; self-inclusion bias = 1/n,
         # acceptable at n >= min_obs_for_baseline (default 5).
 
@@ -366,7 +424,7 @@ class RivalStateEstimator:
 
         if self._baseline.is_ready:
             # Z-score model: normalize against rival's own running distribution
-            z_sp, z_cl, z_ac, z_se = self._baseline.z_score(observation)
+            z_sp, z_cl, z_ac, z_se = self._baseline.z_score(observation, compound=compound)
             # Update temporal tracker after z_scores are available (causal)
             self._temporal.update(z_sp, z_se)
 
