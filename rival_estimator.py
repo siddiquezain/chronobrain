@@ -272,6 +272,14 @@ class RivalSocEstimate(BaseModel):
         False,
         description="True once Z-score baseline has min_obs observations."
     )
+    ml_model_active: bool = Field(
+        False,
+        description="True when ML observation model contributed to the last update cycle."
+    )
+    state_probs: dict = Field(
+        default_factory=dict,
+        description="{'low': p, 'medium': p, 'high': p} bucket distribution from posterior mean ± std."
+    )
 
     def bucket_distribution(self, low_edge_mj: float, high_edge_mj: float) -> dict:
         """P(LOW / MEDIUM / HIGH) from the Gaussian summary of the posterior."""
@@ -300,6 +308,7 @@ class RivalStateEstimator:
         self,
         config: Optional[RivalEstimatorConfig] = None,
         seed: Optional[int] = None,
+        obs_model=None,  # Optional RivalObservationModel — type not imported to avoid circular
     ):
         self.config = config or RivalEstimatorConfig()
         _seed = seed if seed is not None else self.config.default_seed
@@ -311,6 +320,9 @@ class RivalStateEstimator:
         self._n_observations = 0
         self._last_observation: Optional[dict] = None  # diagnostics only
         self._baseline = RivalObservationBaseline(min_obs=cfg.min_obs_for_baseline)
+        self._temporal = RivalTemporalTracker()   # temporal feature tracker
+        self._obs_model = obs_model               # optional ML observation model
+        self._ml_active = False                   # tracks whether ML was used last update
 
     @property
     def observation_count(self) -> int:
@@ -449,6 +461,20 @@ class RivalStateEstimator:
         # NOT presented as empirical uncertainty — use posterior_health to distinguish.
         reported_std = max(std, cfg.min_reported_std_mj) if n > 0 else std
 
+        # Compute state_probs from Gaussian summary of the posterior
+        state_probs: dict = {}
+        if self._n_observations > 0:
+            _std = max(reported_std, 1e-6)
+            _p_low = _norm_cdf((cfg.bucket_low_mj - mean) / _std)
+            _p_high = 1.0 - _norm_cdf((cfg.bucket_high_mj - mean) / _std)
+            _p_med = max(0.0, 1.0 - _p_low - _p_high)
+            _tot = _p_low + _p_med + _p_high
+            state_probs = {
+                "low": round(_p_low / _tot, 4),
+                "medium": round(_p_med / _tot, 4),
+                "high": round(_p_high / _tot, 4),
+            }
+
         return RivalSocEstimate(
             mean_soc_mj=round(mean, 4),
             std_soc_mj=round(reported_std, 4),
@@ -457,6 +483,8 @@ class RivalStateEstimator:
             evidence_quality=evidence_quality,
             posterior_health=posterior_health,
             baseline_ready=self._baseline.is_ready,
+            ml_model_active=self._ml_active,
+            state_probs=state_probs,
         )
 
     def posterior_summary(self, n_bins: int = 12) -> dict:
