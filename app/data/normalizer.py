@@ -162,6 +162,7 @@ def condense_lap(
     rival_lap_status: LapStatus = "racing",
     strategic_rival: Optional[StrategicRivalInfo] = None,
     source_detail: str = "",
+    rival_compound: Optional[str] = None,
 ) -> NormalizedLap:
     """
     Reduce one lap's sub-lap samples (our car + rival) to a NormalizedLap.
@@ -246,6 +247,7 @@ def condense_lap(
         lap_status=lap_status,
         rival_lap_status=rival_lap_status,
         strategic_rival=strategic_rival,
+        rival_compound=rival_compound,
         energy_is_modeled=True,
         raw_sample_count=len(our_samples),
         source_detail=source_detail,

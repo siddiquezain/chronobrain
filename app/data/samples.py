@@ -146,6 +146,11 @@ class NormalizedLap(BaseModel):
     rival_clipping_point_fraction: Optional[float] = Field(None, ge=0.0, le=1.0)
     rival_corner_exit_accel_g: Optional[float] = Field(None, ge=0.0)
     rival_sector_delta_s: Optional[float] = None
+    rival_compound: Optional[str] = Field(
+        None,
+        description="Rival's tyre compound on this lap (SOFT/MEDIUM/HARD/INTERMEDIATE/WET). "
+        "None when unavailable (synthetic, pre-FastF1 extraction laps).",
+    )
 
     # --- provenance ---
     energy_is_modeled: bool = Field(

@@ -117,3 +117,33 @@ _MODES = {
     "CONSERVE_MODE", "BALANCED_MODE", "ARM_OVERTAKE_MODE",
     "USE_OVERTAKE_BONUS_MODE", "PUSH_MODE",
 }
+
+
+def test_condense_lap_rival_compound_threaded():
+    """rival_compound kwarg on condense_lap ends up on NormalizedLap."""
+    from app.data.normalizer import condense_lap
+    from app.data.samples import TelemetrySample
+
+    sample = TelemetrySample(timestamp_s=0.0, lap=1, speed_kmh=280.0, throttle=0.8, brake=0.1)
+    nl = condense_lap(
+        [sample], [],
+        lap=1, total_laps=50, data_mode="REPLAY",
+        prev_soc_mj=None,
+        gap_to_car_ahead_s=None,
+        rival_compound="SOFT",
+    )
+    assert nl.rival_compound == "SOFT"
+
+
+def test_condense_lap_rival_compound_defaults_none():
+    from app.data.normalizer import condense_lap
+    from app.data.samples import TelemetrySample
+
+    sample = TelemetrySample(timestamp_s=0.0, lap=1, speed_kmh=280.0, throttle=0.8, brake=0.1)
+    nl = condense_lap(
+        [sample], [],
+        lap=1, total_laps=50, data_mode="REPLAY",
+        prev_soc_mj=None,
+        gap_to_car_ahead_s=None,
+    )
+    assert nl.rival_compound is None
