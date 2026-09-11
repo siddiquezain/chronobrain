@@ -63,10 +63,13 @@ class TestPlannerBasics:
         assert abs(balanced_proj.mean_laptime_delta_s) < 0.1
 
     def test_use_bonus_better_than_balanced(self):
-        """USE_OVERTAKE_BONUS_MODE should have a more negative (better) mean than BALANCED."""
+        """USE_OVERTAKE_BONUS_MODE should have a more negative (better) mean than
+        BALANCED **when there is a car in range to overtake** — the planner now
+        prices ERS spent with no positional payoff, so a bare static prior no
+        longer makes an attack mode dominate."""
         planner = MonteCarloPlanner(seed=42)
         gate = make_gate_result_all_legal()
-        result = planner.plan(gate)
+        result = planner.plan(gate, PlanningContext(gap_to_car_ahead_s=0.5))
         bonus = next(p for p in result.ranked_modes if p.mode == DeploymentMode.USE_OVERTAKE_BONUS_MODE)
         balanced = next(p for p in result.ranked_modes if p.mode == DeploymentMode.BALANCED_MODE)
         assert bonus.mean_laptime_delta_s < balanced.mean_laptime_delta_s
@@ -162,11 +165,14 @@ class TestRivalModulation:
         p_high_rival = MonteCarloPlanner(seed=42)
         p_low_rival = MonteCarloPlanner(seed=42)
 
+        # a car in range to overtake, so the modulated success prob is realisable
         ctx_high = PlanningContext(
-            rival_soc_estimate=RivalSocEstimate(mean_soc_mj=8.5, std_soc_mj=0.3, n_observations=10)
+            gap_to_car_ahead_s=0.5,
+            rival_soc_estimate=RivalSocEstimate(mean_soc_mj=8.5, std_soc_mj=0.3, n_observations=10),
         )
         ctx_low = PlanningContext(
-            rival_soc_estimate=RivalSocEstimate(mean_soc_mj=1.0, std_soc_mj=0.3, n_observations=10)
+            gap_to_car_ahead_s=0.5,
+            rival_soc_estimate=RivalSocEstimate(mean_soc_mj=1.0, std_soc_mj=0.3, n_observations=10),
         )
 
         r_high = p_high_rival.plan(gate, ctx_high)

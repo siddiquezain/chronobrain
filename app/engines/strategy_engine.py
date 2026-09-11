@@ -20,7 +20,7 @@ This engine demonstrates the key demo narrative:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -142,7 +142,7 @@ class StrategyEngine:
         )
 
         return StrategyRecommendation(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             lap=telemetry.lap,
             recommended_mode=best_mode,
             confidence=round(confidence, 4),

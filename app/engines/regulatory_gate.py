@@ -82,8 +82,8 @@ class AppRegulatoryGate:
             legal=legal,
             violations=violations,
             constraints_checked=[
-                "Art.5.4.10 (deployment cap)",
-                "Art.5.4.9 (SoC swing)",
+                "Per-lap deployment cap (model assumption)",
+                "Per-lap SoC swing (model assumption)",
                 "Overtake proximity threshold",
                 "Overtake bonus banking",
             ],
@@ -91,14 +91,14 @@ class AppRegulatoryGate:
         )
 
     def _evaluate_standalone(self, mode: str, telemetry: TelemetryState) -> RegulatoryCheck:
-        """Standalone legality check using FIA 2026 constants."""
+        """Standalone legality check using the GateConfig-derived constants."""
         from app.core.config import get_settings
         settings = get_settings()
 
         violations: list[str] = []
         constraints = [
-            "Art.5.4.10 (deployment cap)",
-            "Art.5.4.9 (SoC swing)",
+            "Per-lap deployment cap (model assumption)",
+            "Per-lap SoC swing (model assumption)",
             "Overtake proximity threshold",
             "Overtake bonus banking",
         ]
@@ -107,7 +107,7 @@ class AppRegulatoryGate:
         base_cap = settings.max_deployment_per_lap_mj
         bonus_cap = base_cap + settings.overtake_bonus_mj
 
-        # Art. 5.4.10
+        # per-lap deployment cap (model assumption)
         if mode == "USE_OVERTAKE_BONUS_MODE":
             if deployed > bonus_cap:
                 violations.append(f"Deployment {deployed:.2f} MJ exceeds bonus cap {bonus_cap:.1f} MJ")
@@ -115,13 +115,13 @@ class AppRegulatoryGate:
                 violations.append("USE_OVERTAKE_BONUS_MODE requires overtake_qualified_last_lap=True")
         else:
             if deployed > base_cap:
-                violations.append(f"Deployment {deployed:.2f} MJ exceeds Art.5.4.10 cap {base_cap:.1f} MJ")
+                violations.append(f"Deployment {deployed:.2f} MJ exceeds the per-lap cap {base_cap:.1f} MJ")
 
-        # Art. 5.4.9
+        # per-lap SoC swing (model assumption)
         if telemetry.lap_start_soc_mj is not None:
             delta = abs(telemetry.lap_start_soc_mj - telemetry.soc_mj)
             if delta > settings.max_delta_soc_mj:
-                violations.append(f"SoC swing {delta:.2f} MJ exceeds Art.5.4.9 limit {settings.max_delta_soc_mj:.1f} MJ")
+                violations.append(f"SoC swing {delta:.2f} MJ exceeds the SoC-swing limit {settings.max_delta_soc_mj:.1f} MJ")
 
         # ARM_OVERTAKE_MODE proximity
         if mode == "ARM_OVERTAKE_MODE":

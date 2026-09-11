@@ -29,31 +29,44 @@ from telemetry_simulator import TelemetryInput
 
 @dataclass(frozen=True)
 class GateConfig:
-    # Art. 5.4.7 — max instantaneous MGU-K power
+    # Provenance for every field below is catalogued in app/regulation/constants.py
+    # and documented in docs/regulation.md. VERIFIED_FIA = published 2026 F1 /
+    # official F1 communication; MODEL_ASSUMPTION = a ChronoPace modelling choice.
+    # test_regulation_provenance.py fails the build if this drifts.
+
+    # VERIFIED_FIA — 2026 MGU-K maximum electrical power (up from 120 kW).
     max_ers_k_power_kw: float = 350.0
 
-    # Art. 5.4.10 — max energy from MGU-K HV DC bus per lap (deployment side)
+    # MODEL_ASSUMPTION (needs verification) — per-lap electrical deployment cap.
+    # Public figures put deployable energy at ~8-9 MJ/lap depending on circuit;
+    # 9.0 is the top-of-range value used here as one fixed cap. NOT a confirmed
+    # universal FIA constant and NOT tied to a specific article.
     max_deployment_per_lap_mj: float = 9.0
 
-    # Art. 5.4.9 — max SoC swing per lap
+    # MODEL_ASSUMPTION (needs verification) — applied as a per-lap SoC-swing limit.
+    # The 4 MJ figure itself (usable energy stored in the battery at any instant)
+    # is verified; enforcing it as a swing limit in the gate is a modelling choice.
     max_delta_soc_mj: float = 4.0
 
-    # Baseline recovery/harvest figure, event-variable.
-    # citation pending — no confirmed FIA article for this specific figure.
+    # MODEL_ASSUMPTION — nominal per-lap harvest (~8.5 MJ, circuit-variable).
     # Informational/config-only; does NOT gate deployment legality.
     recoverable_energy_baseline_mj: float = 8.5
 
-    # F1 Sporting Regulations — proximity eligibility at detection point
+    # VERIFIED_FIA — proximity to become eligible for 2026 Override / Overtake Mode
+    # (replaces the DRS 1.0 s detection rule).
     overtake_detection_gap_threshold_s: float = 1.0
 
-    # Banked on the qualifying lap, spendable only the following lap
+    # VERIFIED_FIA — additional deployable energy under Override / Overtake Mode
+    # when within the proximity threshold. Officially stated as 0.5 MJ.
     overtake_bonus_mj: float = 0.5
 
-    # Normal deployment taper band (km/h) — hardware behavior, all modes
+    # MODEL_ASSUMPTION — engineered estimate of the normal-deployment power taper
+    # band. No published curve.
     taper_normal_start_kmh: float = 290.0
     taper_normal_end_kmh: float = 355.0
 
-    # Full 350 kW sustained to this speed under Overtake Mode bonus, then tapers
+    # VERIFIED_FIA (value) — officially quoted speed to which full 350 kW is
+    # sustained under Overtake Mode before taper. The taper curve shape is modelled.
     taper_overtake_full_power_end_kmh: float = 337.0
 
 
@@ -125,7 +138,7 @@ class RegulatoryGate:
         base_cap_mj = {m.value: base_cap for m in DeploymentMode}
         base_cap_mj[DeploymentMode.USE_OVERTAKE_BONUS_MODE.value] = bonus_cap
 
-        # --- Art. 5.4.10: per-lap deployment cap ---
+        # --- per-lap deployment cap (MODEL_ASSUMPTION, see GateConfig) ---
         deployed = telemetry.lap_energy_deployed_mj
         if deployed > base_cap:
             for mode in [
@@ -135,14 +148,14 @@ class RegulatoryGate:
                 DeploymentMode.PUSH_MODE,
             ]:
                 violations[mode.value].append(
-                    f"Lap deployment {deployed:.2f} MJ exceeds Art.5.4.10 cap {base_cap:.1f} MJ"
+                    f"Lap deployment {deployed:.2f} MJ exceeds the {base_cap:.1f} MJ per-lap cap"
                 )
             if deployed > bonus_cap:
                 violations[DeploymentMode.USE_OVERTAKE_BONUS_MODE.value].append(
                     f"Lap deployment {deployed:.2f} MJ exceeds bonus cap {bonus_cap:.1f} MJ"
                 )
 
-        # --- Art. 5.4.9: delta-SoC swing ---
+        # --- delta-SoC swing (MODEL_ASSUMPTION: 4 MJ store cap applied as a swing) ---
         # Fails open when lap_start_soc_mj is None — deliberate demo-usability choice.
         # In a safety-certified build this should fail closed.
         if telemetry.lap_start_soc_mj is not None:
@@ -150,8 +163,8 @@ class RegulatoryGate:
             if delta_soc > cfg.max_delta_soc_mj:
                 for mode in DeploymentMode:
                     violations[mode.value].append(
-                        f"SoC swing {delta_soc:.2f} MJ exceeds Art.5.4.9 limit "
-                        f"{cfg.max_delta_soc_mj:.1f} MJ"
+                        f"SoC swing {delta_soc:.2f} MJ exceeds the "
+                        f"{cfg.max_delta_soc_mj:.1f} MJ limit"
                     )
 
         # --- ARM_OVERTAKE_MODE requires proximity at detection point ---

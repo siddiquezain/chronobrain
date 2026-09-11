@@ -5,7 +5,7 @@ ponytail: global lock; per-account locks if multi-user throughput matters.
 """
 
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -59,7 +59,7 @@ class RaceStateManager:
             if running:
                 self._simulation_scenario = scenario
                 self._simulation_tick = 0
-                self._simulation_start_time = datetime.utcnow()
+                self._simulation_start_time = datetime.now(timezone.utc)
             else:
                 self._simulation_start_time = None
 
@@ -72,7 +72,7 @@ class RaceStateManager:
         with self._lock:
             elapsed = 0.0
             if self._simulation_start_time and self._simulation_running:
-                elapsed = (datetime.utcnow() - self._simulation_start_time).total_seconds()
+                elapsed = (datetime.now(timezone.utc) - self._simulation_start_time).total_seconds()
             return {
                 "running": self._simulation_running,
                 "scenario": self._simulation_scenario,

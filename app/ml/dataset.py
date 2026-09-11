@@ -1,39 +1,41 @@
-"""Generate synthetic training data for the overtake success classifier."""
+"""
+Synthetic training data for the overtake-success classifier.
+
+Synthetic on purpose — real per-attempt F1 overtake outcome data is not public.
+The label encodes uncontroversial domain structure (small closing gap + energy +
+DRS + a slower car ahead => more likely to complete the pass). It is NOT
+calibrated against real outcomes.
+"""
+
+from __future__ import annotations
 
 import numpy as np
 
 from app.ml.features import FEATURE_NAMES
 
 _RNG = np.random.default_rng(42)
-
-N_SAMPLES = 5_000
+N_SAMPLES = 6_000
 
 
 def generate() -> tuple[np.ndarray, np.ndarray]:
-    """
-    Returns X (N, 8) and y (N,) for the overtake success classifier.
-
-    Labels are heuristic: high score on gap, closing speed, slipstream, SoC,
-    and DRS → success = 1.
-    """
-    gap = _RNG.uniform(0.1, 3.0, N_SAMPLES)
-    closing = _RNG.uniform(-2.0, 15.0, N_SAMPLES)
-    slipstream = _RNG.uniform(0.0, 1.0, N_SAMPLES)
+    """Return X (N, 6) and y (N,) in FEATURE_NAMES order."""
+    gap = _RNG.uniform(0.1, 3.5, N_SAMPLES)
+    gap_trend = _RNG.uniform(-0.6, 0.4, N_SAMPLES)        # negative = closing
     soc = _RNG.uniform(0.5, 9.0, N_SAMPLES)
-    tyre_age = _RNG.integers(0, 40, N_SAMPLES).astype(float)
-    straight = _RNG.uniform(100.0, 800.0, N_SAMPLES)
     speed = _RNG.uniform(200.0, 350.0, N_SAMPLES)
     drs = _RNG.integers(0, 2, N_SAMPLES).astype(float)
+    rival_speed = _RNG.uniform(290.0, 345.0, N_SAMPLES)
 
-    X = np.column_stack([gap, closing, slipstream, soc, tyre_age, straight, speed, drs])
+    X = np.column_stack([gap, gap_trend, soc, speed, drs, rival_speed])
+    assert X.shape[1] == len(FEATURE_NAMES)
 
-    # Heuristic label
+    # structural score in [0, ~1]
     score = (
-        (1.0 - gap / 3.0) * 0.3
-        + np.clip(closing / 15.0, 0, 1) * 0.25
-        + slipstream * 0.15
-        + (soc / 9.0) * 0.15
-        + drs * 0.15
+        np.clip(1.0 - gap / 3.0, 0.0, 1.0) * 0.30           # close
+        + np.clip(-gap_trend / 0.6, 0.0, 1.0) * 0.25        # closing fast
+        + (soc / 9.0) * 0.15                                # have energy
+        + drs * 0.15                                        # DRS / override
+        + np.clip((325.0 - rival_speed) / 35.0, 0.0, 1.0) * 0.15  # slower car ahead
     )
-    y = (score + _RNG.normal(0, 0.05, N_SAMPLES) > 0.5).astype(int)
+    y = (score + _RNG.normal(0.0, 0.06, N_SAMPLES) > 0.55).astype(int)
     return X, y

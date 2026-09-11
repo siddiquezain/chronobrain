@@ -5,6 +5,14 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from rule_gate import GateConfig
+
+# Single source of truth for the regulatory constants. The v1 decision pipeline
+# reads these straight from GateConfig; the (deprecated) Stack B engines read them
+# from Settings, which now DEFAULTS from GateConfig rather than re-declaring the
+# numbers. Provenance is catalogued in app/regulation/constants.py.
+_GATE = GateConfig()
+
 
 class Settings:
     """
@@ -26,19 +34,27 @@ class Settings:
         self.simulation_interval_s: float = float(os.getenv("SIMULATION_INTERVAL_S", "1.0"))
         self.simulation_seed: int = int(os.getenv("SIMULATION_SEED", "42"))
 
-        # FIA 2026 Art. 5.4.10 — max deployment per lap
-        self.energy_capacity_mj: float = float(os.getenv("ENERGY_CAPACITY_MJ", "9.0"))
+        # Regulatory constants — DEFAULT from rule_gate.GateConfig (the single source
+        # of truth). Env vars still override for local experiments. See
+        # docs/regulation.md for the VERIFIED_FIA vs MODEL_ASSUMPTION split.
+        self.energy_capacity_mj: float = float(
+            os.getenv("ENERGY_CAPACITY_MJ", str(_GATE.max_deployment_per_lap_mj))
+        )
         self.min_energy_reserve_mj: float = float(os.getenv("MIN_ENERGY_RESERVE_MJ", "1.0"))
         self.max_deployment_per_lap_mj: float = float(
-            os.getenv("MAX_DEPLOYMENT_PER_LAP_MJ", "9.0")
+            os.getenv("MAX_DEPLOYMENT_PER_LAP_MJ", str(_GATE.max_deployment_per_lap_mj))
         )
-        # FIA 2026 Art. 5.4.9 — max SoC swing per lap
-        self.max_delta_soc_mj: float = float(os.getenv("MAX_DELTA_SOC_MJ", "4.0"))
-        # Overtake bonus (banked per qualifying lap)
-        self.overtake_bonus_mj: float = float(os.getenv("OVERTAKE_BONUS_MJ", "0.5"))
-        # Proximity threshold for overtake mode eligibility
+        self.max_delta_soc_mj: float = float(
+            os.getenv("MAX_DELTA_SOC_MJ", str(_GATE.max_delta_soc_mj))
+        )
+        self.overtake_bonus_mj: float = float(
+            os.getenv("OVERTAKE_BONUS_MJ", str(_GATE.overtake_bonus_mj))
+        )
         self.overtake_detection_gap_threshold_s: float = float(
-            os.getenv("OVERTAKE_DETECTION_GAP_THRESHOLD_S", "1.0")
+            os.getenv(
+                "OVERTAKE_DETECTION_GAP_THRESHOLD_S",
+                str(_GATE.overtake_detection_gap_threshold_s),
+            )
         )
 
         # Overtake weights (configurable, not hardcoded — these are not FIA values)

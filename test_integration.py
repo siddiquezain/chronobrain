@@ -69,7 +69,11 @@ class TestScenarioB:
         telemetry = self._get_scenario_b_telemetry()
         gate = gate_from_telemetry(telemetry)
         planner = MonteCarloPlanner(seed=42)
-        result = planner.plan(gate)
+        # the planner now needs the live race state (a car in range) to rank an
+        # attack mode first — a static prior alone must not do it.
+        result = planner.plan(
+            gate, PlanningContext(gap_to_car_ahead_s=telemetry.gap_to_car_ahead_s)
+        )
 
         # USE_OVERTAKE_BONUS or ARM should be top pick (both have negative mean delta)
         assert result.recommended_mode in (
@@ -158,7 +162,7 @@ class TestAbstention:
         result = planner.plan(gate)
 
         # High rival uncertainty (std=3.0 > threshold=1.5) must fail rival_confidence gate
-        rival = RivalSocEstimate(mean_soc_mj=4.0, std_soc_mj=3.0, n_observations=1)
+        rival = RivalSocEstimate(mean_soc_mj=4.0, std_soc_mj=3.0, n_observations=5, baseline_ready=True)
         cg = ConfidenceGate()
         cg_result = cg.evaluate(result, rival_estimate=rival, planner=planner)
 

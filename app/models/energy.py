@@ -10,7 +10,7 @@ class EnergyState(BaseModel):
     deployed_this_lap_mj: float = Field(..., ge=0.0, description="Energy deployed this lap (MJ)")
     harvested_this_lap_mj: float = Field(..., ge=0.0, description="Energy harvested this lap (MJ)")
     deployment_headroom_mj: float = Field(
-        ..., description="Remaining budget before Art.5.4.10 cap (MJ)"
+        ..., description="Remaining budget before the per-lap deployment cap (MJ)"
     )
     projected_reserve_mj: float = Field(
         ..., description="Projected energy at end of lap (MJ)"
