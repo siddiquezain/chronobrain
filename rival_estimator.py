@@ -15,6 +15,7 @@ All four observables are derived from publicly available FIA timing/GPS data.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -118,6 +119,45 @@ class RivalObservationBaseline:
         )
 
 
+@dataclass
+class RivalTemporalTracker:
+    """
+    Rolling Z-score history per rival for temporal feature extraction.
+    Call update(z_speed, z_sector) once per lap, after baseline.z_score().
+    Provides slope + persistence signals for the ML observation model.
+    """
+    window_size: int = 5
+    _speed_z_history: "deque[float]" = field(init=False, repr=False)
+    _speed_persist: int = field(default=0, init=False, repr=False)
+    _sector_persist: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._speed_z_history = deque(maxlen=self.window_size)
+
+    def update(self, z_speed: float, z_sector: float) -> None:
+        """Update after each z_score() call. Same causal ordering as baseline."""
+        self._speed_z_history.append(z_speed)
+        self._speed_persist = self._speed_persist + 1 if z_speed < 0.0 else 0
+        self._sector_persist = self._sector_persist + 1 if z_sector > 0.0 else 0
+
+    @property
+    def speed_slope(self) -> float:
+        """Linear trend of speed Z over last window_size laps. Negative = declining."""
+        h = list(self._speed_z_history)
+        if len(h) < 2:
+            return 0.0
+        x = np.arange(len(h), dtype=float)
+        return float(np.polyfit(x, h, 1)[0])
+
+    @property
+    def speed_persistence(self) -> int:
+        return self._speed_persist
+
+    @property
+    def sector_persistence(self) -> int:
+        return self._sector_persist
+
+
 @dataclass(frozen=True)
 class RivalEstimatorConfig:
     """
@@ -163,6 +203,12 @@ class RivalEstimatorConfig:
     sector_gain_s: float = 0.4
 
     default_seed: int = 42
+
+    # Energy-state bucket boundaries for ML likelihood mapping.
+    # ponytail: model assumptions — no ground-truth calibration available.
+    #   Adjust if posterior diagnostics show systematic bias on real sessions.
+    bucket_low_mj: float = 2.5   # SoC below this → LOW energy bucket
+    bucket_high_mj: float = 5.5  # SoC above this → HIGH energy bucket
 
     min_obs_for_baseline: int = 5  # matches RivalObservationBaseline.min_obs
 
