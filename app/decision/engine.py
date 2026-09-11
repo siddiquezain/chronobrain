@@ -248,7 +248,7 @@ def _thread_state(ctx: DecisionContext) -> None:
         obs = to_rival_observation(nl)
         if obs is not None:
             est.predict()
-            est.update(obs)
+            est.update(obs, compound=nl.rival_compound or "UNKNOWN")
         elif est.observation_count > 0:
             # rival lap was pit / out / invalid — a lap passed but there is no
             # clean observation. Advance the drift (uncertainty grows) but do NOT

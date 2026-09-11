@@ -85,12 +85,13 @@ def collect_features(sessions: list[dict]) -> np.ndarray:
                 continue
 
             obs = _make_obs_adapter(nl)
-            baseline.update(obs)
+            cpd = nl.rival_compound or "UNKNOWN"
+            baseline.update(obs, compound=cpd)
 
             if not baseline.is_ready:
                 continue  # warm-up; Z-scores unreliable before min_obs
 
-            z_sp, z_cl, z_ac, z_se = baseline.z_score(obs)
+            z_sp, z_cl, z_ac, z_se = baseline.z_score(obs, compound=cpd)
             temporal.update(z_sp, z_se)
 
             rows.append([
