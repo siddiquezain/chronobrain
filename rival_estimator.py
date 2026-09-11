@@ -137,8 +137,8 @@ class RivalTemporalTracker:
     def update(self, z_speed: float, z_sector: float) -> None:
         """Update after each z_score() call. Same causal ordering as baseline."""
         self._speed_z_history.append(z_speed)
-        self._speed_persist = self._speed_persist + 1 if z_speed < 0.0 else 0
-        self._sector_persist = self._sector_persist + 1 if z_sector > 0.0 else 0
+        self._speed_persist = self._speed_persist + 1 if z_speed < 0.0 else 0  # strictly negative; zero is not a low-speed signal
+        self._sector_persist = self._sector_persist + 1 if z_sector > 0.0 else 0  # strictly positive; zero is not a sector-loss signal
 
     @property
     def speed_slope(self) -> float:

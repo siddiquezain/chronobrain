@@ -1,6 +1,5 @@
 """Tests for RivalTemporalTracker."""
 import numpy as np
-import pytest
 from rival_estimator import RivalTemporalTracker
 
 
@@ -45,3 +44,14 @@ def test_bucket_thresholds_in_config():
     cfg = RivalEstimatorConfig()
     assert cfg.bucket_low_mj == 2.5
     assert cfg.bucket_high_mj == 5.5
+
+
+def test_speed_slope_after_more_than_window_updates():
+    """Deque maxlen=5 should discard oldest entries; slope still computes correctly."""
+    t = RivalTemporalTracker()
+    # Feed 8 values: first 3 positive, last 5 strongly negative (declining)
+    for z in [1.0, 0.8, 0.6, -0.5, -1.0, -1.5, -2.0, -2.5]:
+        t.update(z, 0.0)
+    # Only last 5 are in window: [-0.5, -1.0, -1.5, -2.0, -2.5] — clearly declining
+    assert t.speed_slope < 0
+    assert t.speed_persistence == 5  # all 5 in window are negative
