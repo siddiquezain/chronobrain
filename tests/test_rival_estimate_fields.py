@@ -97,3 +97,35 @@ def test_ml_inactive_before_baseline_ready():
         est.update(Obs())
 
     assert len(calls) == 0, "ML model called before baseline warm-up complete"
+
+
+def test_engine_injects_obs_model_into_estimators(monkeypatch):
+    """_thread_state should pass the cached obs_model to each RivalStateEstimator."""
+    import app.decision.engine as eng
+
+    sentinel = object()
+    created_with = []
+
+    original_init = eng.RivalStateEstimator.__init__
+
+    def tracking_init(self, config=None, seed=None, obs_model=None):
+        created_with.append(obs_model)
+        original_init(self, config=config, seed=seed, obs_model=obs_model)
+
+    monkeypatch.setattr(eng, "_get_rival_obs_model", lambda: sentinel)
+    monkeypatch.setattr(eng.RivalStateEstimator, "__init__", tracking_init)
+
+    from app.data.samples import NormalizedLap
+    from app.decision.config import DecisionConfig
+    from app.decision.context import DecisionContext
+
+    nl = NormalizedLap(
+        lap=1, total_laps=10, data_mode="SYNTHETIC",
+        our_speed_kmh=280.0, our_soc_mj=4.0,
+    )
+    ctx = DecisionContext(config=DecisionConfig(), lap_history=[nl], target_lap=nl)
+    eng._thread_state(ctx)
+
+    assert any(m is sentinel for m in created_with), (
+        "No RivalStateEstimator was created with the sentinel obs_model"
+    )

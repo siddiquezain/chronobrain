@@ -68,8 +68,21 @@ from app.decision.snapshot import (
 from app.decision.trace import build_trace
 from app.regulation.constants import REGULATORY_CONSTANTS
 from app.narrative.narrator import narrate as _narrate
+from app.ml.rival_observation_model import RivalObservationModel as _RivalObsModel
 
 PIPELINE_VERSION = "2.0"  # bumped: data-quality gate, event-time window, FEV, feasible set
+
+_rival_obs_model: Optional["_RivalObsModel"] = None
+_rival_obs_model_loaded: bool = False
+
+
+def _get_rival_obs_model() -> Optional["_RivalObsModel"]:
+    """Load rival observation model once per process. None = Gaussian fallback active."""
+    global _rival_obs_model, _rival_obs_model_loaded
+    if not _rival_obs_model_loaded:
+        _rival_obs_model = _RivalObsModel.load_or_none()
+        _rival_obs_model_loaded = True
+    return _rival_obs_model
 
 _AGGRESSIVE = {
     DeploymentMode.ARM_OVERTAKE_MODE,
@@ -208,7 +221,8 @@ def _thread_state(ctx: DecisionContext) -> None:
     cfg = ctx.config
     gate = RegulatoryGate(config=cfg.gate_config())
 
-    default_est = RivalStateEstimator(config=cfg.rival_config(), seed=cfg.seed)
+    obs_model = _get_rival_obs_model()
+    default_est = RivalStateEstimator(config=cfg.rival_config(), seed=cfg.seed, obs_model=obs_model)
     estimators: dict[str, RivalStateEstimator] = {}
 
     def _est_for(driver: Optional[str]) -> RivalStateEstimator:
@@ -216,7 +230,9 @@ def _thread_state(ctx: DecisionContext) -> None:
             return default_est
         if driver not in estimators:
             estimators[driver] = RivalStateEstimator(
-                config=cfg.rival_config(), seed=cfg.seed + _driver_seed_offset(driver)
+                config=cfg.rival_config(),
+                seed=cfg.seed + _driver_seed_offset(driver),
+                obs_model=obs_model,
             )
         return estimators[driver]
 
