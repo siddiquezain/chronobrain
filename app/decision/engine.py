@@ -963,7 +963,7 @@ def _ml_overtake_probability(
             gap_trend_s_per_lap=(window.gap_ahead_trend_s_per_lap if window is not None else None),
             our_soc_mj=soc_mj,
             our_speed_kmh=nl.our_speed_kmh,
-            drs_available=nl.overtake_mode_eligible,
+            overtake_mode_eligible=nl.overtake_mode_eligible,
             rival_terminal_speed_kmh=nl.rival_terminal_speed_kmh,
         )
         return round(float(predict_probability(feats)), 4)

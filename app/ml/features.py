@@ -19,7 +19,7 @@ FEATURE_NAMES = [
     "gap_trend_s_per_lap",      # negative = closing on the car ahead
     "our_soc_mj",               # energy available to spend
     "our_speed_kmh",            # pace
-    "drs_available",            # 0 / 1 (Override / Overtake Mode eligibility proxy)
+    "overtake_mode_eligible",   # 0 / 1 (2026 Overtake Mode eligibility: gap <= 1.0 s)
     "rival_terminal_speed_kmh", # lower = a slower / fading car ahead
 ]
 
@@ -32,7 +32,7 @@ def build_features(
     gap_trend_s_per_lap: Optional[float],
     our_soc_mj: float,
     our_speed_kmh: float,
-    drs_available: Optional[bool],
+    overtake_mode_eligible: Optional[bool],
     rival_terminal_speed_kmh: Optional[float],
 ) -> np.ndarray:
     """Return a (1, 6) float array in FEATURE_NAMES order. Unknowns -> neutral."""
@@ -41,6 +41,6 @@ def build_features(
         0.0 if gap_trend_s_per_lap is None else float(gap_trend_s_per_lap),
         float(our_soc_mj),
         float(our_speed_kmh),
-        1.0 if drs_available else 0.0,
+        1.0 if overtake_mode_eligible else 0.0,
         _RIVAL_SPEED_MISSING if rival_terminal_speed_kmh is None else float(rival_terminal_speed_kmh),
     ]], dtype=np.float64)

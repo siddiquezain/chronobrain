@@ -65,12 +65,12 @@ def predict_probability(features: np.ndarray) -> float:
         return float(clf.predict_proba(features)[0, 1])
 
     # Heuristic fallback — mirrors the dataset label formula in dataset.py
-    gap, gap_trend, soc, _speed, drs, rival_speed = features[0]
+    gap, gap_trend, soc, _speed, overtake_eligible, rival_speed = features[0]
     score = (
         max(0.0, 1.0 - gap / 3.0) * 0.30
         + max(0.0, min(1.0, -gap_trend / 0.6)) * 0.25
         + (soc / 9.0) * 0.15
-        + drs * 0.15
+        + overtake_eligible * 0.15
         + max(0.0, min(1.0, (325.0 - rival_speed) / 35.0)) * 0.15
     )
     return float(np.clip(score, 0.0, 1.0))
