@@ -52,6 +52,7 @@ from app.decision.snapshot import (
     ComplianceCheck,
     ConfidenceBlock,
     ConstraintsBlock,
+    ContextAttributionBlock,
     CounterfactualBlock,
     DataQualityBlock,
     DecisionBlock,
@@ -664,6 +665,58 @@ def _horizon_prefers_wait(ctx: DecisionContext, margin_mult: float = 1.0) -> tup
 # ===========================================================================
 # assemble snapshot
 # ===========================================================================
+def _build_context_attribution(nl, rival_soc_estimate) -> Optional[ContextAttributionBlock]:
+    """Build context attribution block from the last lap and rival estimate."""
+    try:
+        active_aero = "UNKNOWN"
+        if nl.overtake_mode_eligible:
+            active_aero = "OVERTAKE_ELIGIBLE"
+        elif nl.our_speed_kmh is not None and nl.our_speed_kmh > 270:
+            active_aero = "STRAIGHT_MODE"
+        elif nl.our_speed_kmh is not None:
+            active_aero = "CORNER_MODE"
+
+        rival_compound = nl.rival_compound
+
+        residual_confidence = "UNAVAILABLE"
+        if rival_soc_estimate is not None:
+            eq = getattr(rival_soc_estimate, "evidence_quality", "insufficient")
+            residual_confidence = {
+                "strong": "HIGH",
+                "moderate": "MEDIUM",
+                "weak": "LOW",
+                "insufficient": "UNAVAILABLE",
+            }.get(eq, "UNAVAILABLE")
+
+        compound_baseline_active = False
+        if rival_soc_estimate is not None:
+            compound_baseline_active = bool(getattr(rival_soc_estimate, "baseline_ready", False))
+
+        if rival_compound and compound_baseline_active:
+            note = (
+                f"Compound-stratified baseline active for {rival_compound}; "
+                "tyre compound effect normalised before energy inference."
+            )
+        elif rival_compound:
+            note = (
+                f"Rival on {rival_compound} but compound-specific baseline may not yet "
+                "have enough laps; pooled baseline used."
+            )
+        else:
+            note = "Rival tyre compound unavailable; pooled baseline used for context attribution."
+
+        return ContextAttributionBlock(
+            rival_tyre_compound=rival_compound,
+            compound_baseline_active=compound_baseline_active,
+            observed_sector_delta_s=nl.rival_sector_delta_s,
+            context_explained_note=note,
+            active_aero_mode=active_aero,
+            residual_evidence_confidence=residual_confidence,
+        )
+    except Exception:
+        return None
+
+
 def _build_counterfactual(planner_result, decision_block) -> Optional[CounterfactualBlock]:
     """Build counterfactual from planner runner-up data. None if < 2 ranked modes."""
     try:
@@ -879,6 +932,10 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
     )
 
     counterfactual = _build_counterfactual(pr, decision_block)
+    context_attribution = _build_context_attribution(
+        nl=nl,
+        rival_soc_estimate=(ctx.rival.estimate if ctx.rival is not None else None),
+    )
 
     meta = SnapshotMeta(
         lap=nl.lap, total_laps=nl.total_laps, data_mode=nl.data_mode,
@@ -901,6 +958,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         confidence=confidence_block,
         constraints=constraints_block,
         counterfactual=counterfactual,
+        context_attribution=context_attribution,
         candidate_actions=list(ctx.candidate_actions),
         feasible_actions=list(ctx.feasible_actions),
         rejected_alternatives=[RejectedAlternative(**r) for r in ctx.rejected_alternatives],

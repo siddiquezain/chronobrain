@@ -247,6 +247,47 @@ class CounterfactualBlock(BaseModel):
     )
 
 
+class ContextAttributionBlock(BaseModel):
+    """
+    Tyre context and active aero attribution for the rival's observed pace delta.
+
+    The compound-stratified Z-score baseline (rival_estimator.py) removes compound-
+    specific performance differences before feeding the particle filter. This block
+    surfaces that attribution explicitly.
+
+    IMPORTANT: ChronoPace does NOT model full tyre degradation curves. Tyre context
+    is handled by Z-score normalization against the rival's own compound-specific
+    baseline. No absolute 'tyre-explained seconds' figure is computed.
+    """
+    rival_tyre_compound: Optional[str] = Field(
+        None, description="Rival's tyre compound this lap (SOFT/MEDIUM/HARD/UNKNOWN). "
+        "None when unavailable (synthetic mode)."
+    )
+    compound_baseline_active: bool = Field(
+        False,
+        description="True when the compound-specific Z-score baseline has >= 5 laps on "
+        "this compound, enabling compound-stratified normalisation."
+    )
+    observed_sector_delta_s: Optional[float] = Field(
+        None, description="Rival's raw sector delta vs. their own running baseline (s). "
+        "Negative = rival faster than their own average."
+    )
+    context_explained_note: str = Field(
+        "",
+        description="Human-readable note on how tyre context was handled."
+    )
+    active_aero_mode: str = Field(
+        "UNKNOWN",
+        description="OVERTAKE_ELIGIBLE | STRAIGHT_MODE | CORNER_MODE | UNKNOWN — "
+        "our car's active aero state inferred from gap and speed."
+    )
+    residual_evidence_confidence: str = Field(
+        "UNAVAILABLE",
+        description="HIGH | MEDIUM | LOW | UNAVAILABLE — confidence that the residual "
+        "(after context attribution) reflects rival energy management."
+    )
+
+
 class ComplianceCheck(BaseModel):
     rule: str
     provenance: str = Field(..., description="VERIFIED_FIA | MODEL_ASSUMPTION | DEMO_CONSTANT")
@@ -308,6 +349,9 @@ class DecisionSnapshot(BaseModel):
     counterfactual: Optional[CounterfactualBlock] = Field(
         None, description="What would happen if the recommended action is NOT taken. "
         "None when there is only one feasible mode (no comparison possible)."
+    )
+    context_attribution: Optional[ContextAttributionBlock] = Field(
+        None, description="Tyre compound context and active aero attribution for rival pace delta."
     )
     candidate_actions: List[str]
     feasible_actions: List[str]
