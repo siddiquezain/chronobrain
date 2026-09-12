@@ -10,6 +10,7 @@ from app.api.routes import health, race, energy, overtake, strategy, simulation
 from app.api.routes.v1 import decision as v1_decision
 from app.api.routes.v1 import demo as v1_demo
 from app.api.routes.v1 import replay as v1_replay
+from app.api.routes.v1.validation import router as v1_validation_router
 from app.api.websocket import websocket_endpoint
 from app.core.logging import setup_logging
 
@@ -53,6 +54,7 @@ app.include_router(simulation.router)
 app.include_router(v1_decision.router)
 app.include_router(v1_demo.router)
 app.include_router(v1_replay.router)
+app.include_router(v1_validation_router)
 
 
 @app.middleware("http")

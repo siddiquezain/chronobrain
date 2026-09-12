@@ -219,3 +219,91 @@ def test_synthetic_validation_is_labeled_controlled():
     assert "MODELED" in result.rival_soc.evaluation_note.upper()
     # Honesty notice must be present
     assert "NOT MEASURED" in result.rival_soc.honesty_notice.upper()
+
+
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+
+# Test 9: API distinguishes validation MAE from live inference confidence
+def test_api_validation_separate_from_live_decision():
+    """
+    Spec requirement 9: UI/API distinguishes validation MAE from live inference confidence.
+    The validation endpoint is GET /api/v1/validation/summary — completely separate
+    from POST /api/v1/decision.
+    """
+    # POST /api/v1/decision must NOT have rival_soc_validation in its response
+    decision_resp = client.post(
+        "/api/v1/decision",
+        json={"source": "synthetic", "scenario": "B", "seed": 42}
+    )
+    assert decision_resp.status_code == 200
+    decision_data = decision_resp.json()
+    assert "rival_soc_validation" not in decision_data, \
+        "Validation block must not appear in POST /api/v1/decision"
+    assert "mae_mj" not in str(decision_data), \
+        "MAE must not appear in live decision response"
+
+    # GET /api/v1/validation/summary has the validation block
+    val_resp = client.get("/api/v1/validation/summary", params={"scenario": "B", "seed": 42})
+    assert val_resp.status_code == 200
+    val_data = val_resp.json()
+    assert "rival_soc" in val_data
+    assert "mae_mj" in val_data["rival_soc"]
+    assert val_data["rival_soc"]["ground_truth_available"] is True
+    assert val_data["rival_soc"]["validation_type"] == "controlled_hidden_state"
+
+
+def test_api_validation_summary_schema():
+    """Validation summary has all required fields."""
+    resp = client.get("/api/v1/validation/summary", params={"scenario": "B", "seed": 42})
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Top-level required fields
+    for field in ("scenario", "seed", "ground_truth_available", "rival_soc", "rival_classification"):
+        assert field in data, f"Missing field: {field}"
+
+    # Rival SoC block required fields
+    rival_soc = data["rival_soc"]
+    for field in ("mae_mj", "rmse_mj", "median_ae_mj", "p90_ae_mj", "sample_count",
+                  "ground_truth_available", "validation_type", "evaluation_note", "honesty_notice"):
+        assert field in rival_soc, f"rival_soc missing field: {field}"
+
+    assert rival_soc["ground_truth_available"] is True
+    assert rival_soc["mae_mj"] is not None
+    assert rival_soc["mae_mj"] >= 0.0
+    assert rival_soc["sample_count"] > 0
+
+
+def test_api_validation_ground_truth_note_is_honest():
+    """evaluation_note must say MODELED — NOT MEASURED for synthetic."""
+    resp = client.get("/api/v1/validation/summary", params={"scenario": "B", "seed": 42})
+    data = resp.json()
+    note = data["rival_soc"]["evaluation_note"]
+    assert "MODELED" in note.upper(), f"Note must say MODELED: {note}"
+
+
+def test_api_validation_not_stub_zero():
+    """MAE must not be None for a real run."""
+    resp = client.get("/api/v1/validation/summary", params={"scenario": "B", "seed": 42})
+    data = resp.json()
+    mae = data["rival_soc"]["mae_mj"]
+    assert mae is not None
+
+
+def test_api_validation_classification_block():
+    """Rival classification block has confusion matrix and accuracy."""
+    resp = client.get("/api/v1/validation/summary", params={"scenario": "B", "seed": 42})
+    data = resp.json()
+    cls = data["rival_classification"]
+    assert cls["ground_truth_available"] is True
+    assert cls["accuracy"] is not None
+    assert 0.0 <= cls["accuracy"] <= 1.0
+    assert cls["confusion_matrix"] is not None
+    assert len(cls["confusion_matrix"]) == 3
+    assert all(len(row) == 3 for row in cls["confusion_matrix"])
+    assert cls["per_class_f1"] is not None
+    assert set(cls["per_class_f1"].keys()) == {"LOW", "MEDIUM", "HIGH"}
