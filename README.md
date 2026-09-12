@@ -208,8 +208,45 @@ Copy `.env.example` to `.env`:
 | `compliance` | FIA 2026 regulatory check |
 | `confidence` | 5-gate significance check |
 | `counterfactual` | What if we don't act? |
-| `context_attribution` | Tyre compound + active aero attribution |
+| `context_attribution` | Tyre compound + active aero attribution + cause_attribution |
+| `rival_intent` | Inferred rival strategic intent, response capability, trap probability |
 | `narrative` | Optional LLM explanation (never authoritative) |
+
+### Rival Intent Inference
+
+ChronoPace infers the rival's **strategic intent** from the particle-filter SoC posterior, observable performance trends, and tactical posture.
+
+| Intent | Signal |
+|--------|--------|
+| `DEPLOYING` | Sector delta trending negative + high-energy posterior |
+| `CONSERVING` | Sector delta trending positive + lower-energy posterior |
+| `HARVESTING` | Sector delta trending positive + sufficient energy (deliberate recovery) |
+| `DEFENDING` | P(defend) elevated — rival posture consistent with active defence |
+| `UNCERTAIN` | Insufficient evidence to classify |
+
+**Response Capability** — can the rival deploy a counter-attack this lap?
+- `CAN_COUNTER` — posterior SoC high enough for credible counter-deployment
+- `CANNOT_COUNTER` — posterior SoC too low
+- `UNCERTAIN` — evidence insufficient
+
+**Trap Probability** (`trap_probability: 0.0–1.0`): probability the rival is *intentionally* conserving/appearing slow to bait a counter-attack. High apparent opportunity ≠ guaranteed safe window.
+
+> **Important:** These are probabilistic inferences from observable kinematic signals. ChronoPace does not access rival car telemetry, team radio, or strategy systems. All values are **MODELED — NOT MEASURED**.
+
+### Cause Attribution
+
+For each lap's observed rival pace delta, `context_attribution.cause_attribution` breaks down the estimated evidence weight across contributing factors:
+
+```json
+{
+  "tyre": 0.54,
+  "energy": 0.31,
+  "traffic_aero": 0.09,
+  "other": 0.06
+}
+```
+
+These are **modelled evidence proportions**, not causal percentages. Tyre context is normalised away before feeding the particle filter via the compound-stratified Z-score baseline. Only the residual (after tyre context) strongly influences the rival energy estimate.
 
 ## Demo Commands
 
