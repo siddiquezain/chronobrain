@@ -64,6 +64,7 @@ from app.decision.snapshot import (
     OpportunityStrategy,
     RejectedAlternative,
     RivalBlock,
+    RivalIntentBlock,
     SnapshotMeta,
     WindowBlock,
 )
@@ -803,6 +804,77 @@ def _build_counterfactual(planner_result, decision_block) -> Optional[Counterfac
         return None
 
 
+def _build_rival_intent(rival_soc_estimate, p_defend: float, window_block) -> Optional[RivalIntentBlock]:
+    """
+    Infer rival strategic intent from particle-filter posterior and window trends.
+
+    MODELED — NOT MEASURED. All values are probabilistic inferences from observable
+    kinematic features. No access to actual rival car systems or team strategy.
+    """
+    try:
+        est = rival_soc_estimate
+        mean_soc = est.mean_soc_mj
+        state_probs = est.state_probs or {}
+        p_low = state_probs.get("low", 0.0)
+        p_high = state_probs.get("high", 0.0)
+
+        sector_trend = getattr(window_block, "rival_sector_delta_trend", None)  # +ve = slowing
+        closing = getattr(window_block, "closing", False)
+
+        # Intent classification — ordered from most specific to least
+        if p_defend > 0.55:
+            intent = "DEFENDING"
+            intent_conf = float(min(1.0, p_defend))
+        elif sector_trend is not None and sector_trend < -0.08 and p_high > 0.35:
+            # Getting faster + high-energy posterior → likely deploying
+            intent = "DEPLOYING"
+            intent_conf = float(min(1.0, p_high * 1.4))
+        elif sector_trend is not None and sector_trend > 0.12 and mean_soc < 4.5 and p_low > 0.25:
+            # Slowing + lower-energy posterior → conserving
+            intent = "CONSERVING"
+            intent_conf = float(min(1.0, p_low * 1.3 + 0.2))
+        elif sector_trend is not None and sector_trend > 0.10 and mean_soc >= 4.5:
+            # Slowing but has energy → harvesting (deliberate energy recovery)
+            intent = "HARVESTING"
+            intent_conf = 0.40
+        else:
+            intent = "UNCERTAIN"
+            intent_conf = float(max(0.15, 0.5 - est.std_soc_mj * 0.1))
+
+        # Response capability: posterior SoC high enough for a counter-deployment?
+        if p_high > 0.50 or mean_soc > 5.5:
+            response_capability = "CAN_COUNTER"
+        elif p_low > 0.55 or mean_soc < 2.5:
+            response_capability = "CANNOT_COUNTER"
+        else:
+            response_capability = "UNCERTAIN"
+
+        # Trap probability: rival appearing slow/conserving but posterior SoC still high
+        # → could be deliberately baiting our attack
+        trap_prob = 0.0
+        if intent in ("CONSERVING", "HARVESTING") and p_high > 0.25:
+            trap_prob = float(min(0.75, p_high * 1.5))
+        elif p_defend > 0.40 and mean_soc > 4.0:
+            trap_prob = float(min(0.55, p_defend * 1.1))
+
+        trend_str = "N/A" if sector_trend is None else f"{sector_trend:.3f} s/lap"
+        evidence = (
+            f"SoC posterior: mean={mean_soc:.2f} MJ, p_low={p_low:.2f}, p_high={p_high:.2f}; "
+            f"sector_delta_trend={trend_str}; p_defend={p_defend:.2f}; closing={closing}. "
+            "MODELED — NOT MEASURED."
+        )
+
+        return RivalIntentBlock(
+            intent=intent,
+            intent_confidence=round(intent_conf, 3),
+            response_capability=response_capability,
+            trap_probability=round(trap_prob, 3),
+            intent_evidence=evidence,
+        )
+    except Exception:
+        return None
+
+
 def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
     nl = ctx.target_lap
     e = ctx.energy
@@ -977,6 +1049,15 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         nl=nl,
         rival_soc_estimate=(ctx.rival.estimate if ctx.rival is not None else None),
     )
+    rival_intent_block = (
+        _build_rival_intent(
+            rival_soc_estimate=ctx.rival.estimate,
+            p_defend=ctx.rival.p_defend,
+            window_block=window_block,
+        )
+        if ctx.rival is not None
+        else None
+    )
 
     meta = SnapshotMeta(
         lap=nl.lap, total_laps=nl.total_laps, data_mode=nl.data_mode,
@@ -1000,6 +1081,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         constraints=constraints_block,
         counterfactual=counterfactual,
         context_attribution=context_attribution,
+        rival_intent=rival_intent_block,
         candidate_actions=list(ctx.candidate_actions),
         feasible_actions=list(ctx.feasible_actions),
         rejected_alternatives=[RejectedAlternative(**r) for r in ctx.rejected_alternatives],

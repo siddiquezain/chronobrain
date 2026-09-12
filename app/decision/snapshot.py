@@ -219,6 +219,55 @@ class MonteCarloBlock(BaseModel):
     )
 
 
+class RivalIntentBlock(BaseModel):
+    """
+    Inferred rival strategic intent and response capability.
+
+    Derived from the particle-filter SoC posterior, p_defend, and observable
+    performance trends. MODELED — NOT MEASURED. This is probabilistic inference,
+    not a measurement or claim of access to private team strategy.
+
+    Intent values:
+      DEPLOYING  — rival appears to be actively spending electrical energy
+      CONSERVING — rival appears to be managing/saving energy
+      HARVESTING — rival appears to be reducing pace to recover energy
+      DEFENDING  — rival posture suggests active defence (see p_defend)
+      UNCERTAIN  — insufficient evidence to classify
+
+    Response capability:
+      CAN_COUNTER    — posterior SoC high enough to respond to an attack
+      CANNOT_COUNTER — posterior SoC too low for a credible counter-deployment
+      UNCERTAIN      — insufficient evidence
+    """
+    intent: str = Field(
+        "UNCERTAIN",
+        description="DEPLOYING | CONSERVING | HARVESTING | DEFENDING | UNCERTAIN",
+    )
+    intent_confidence: float = Field(
+        0.0, ge=0.0, le=1.0,
+        description="Confidence in the intent classification (0–1). MODELED.",
+    )
+    response_capability: str = Field(
+        "UNCERTAIN",
+        description="CAN_COUNTER | CANNOT_COUNTER | UNCERTAIN — can rival respond this lap?",
+    )
+    trap_probability: float = Field(
+        0.0, ge=0.0, le=1.0,
+        description=(
+            "P(rival is intentionally conserving/appearing slow to bait a counter-attack). "
+            "High apparent opportunity does not guarantee a safe window. "
+            "MODEL_ASSUMPTION — probabilistic inference, NOT causal certainty."
+        ),
+    )
+    intent_evidence: str = Field(
+        "",
+        description=(
+            "Human-readable evidence trace for the intent inference. "
+            "MODEL_ASSUMPTION — never an accuracy claim."
+        ),
+    )
+
+
 class CounterfactualBlock(BaseModel):
     """What would happen if we did NOT choose the recommended action."""
     recommended_action: str = Field(..., description="The action the engine recommends")
@@ -361,6 +410,13 @@ class DecisionSnapshot(BaseModel):
     )
     context_attribution: Optional[ContextAttributionBlock] = Field(
         None, description="Tyre compound context and active aero attribution for rival pace delta."
+    )
+    rival_intent: Optional[RivalIntentBlock] = Field(
+        None,
+        description=(
+            "Inferred rival strategic intent, response capability, and trap probability. "
+            "MODELED — NOT MEASURED. None when rival data is unavailable."
+        ),
     )
     candidate_actions: List[str]
     feasible_actions: List[str]
