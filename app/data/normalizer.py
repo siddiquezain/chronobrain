@@ -243,7 +243,7 @@ def condense_lap(
         gap_to_car_behind_s=gap_to_car_behind_s,
         position=position,
         sector=sector,
-        drs_available=drs_open,
+        overtake_mode_eligible=drs_open,
         lap_status=lap_status,
         rival_lap_status=rival_lap_status,
         strategic_rival=strategic_rival,

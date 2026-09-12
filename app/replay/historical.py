@@ -204,7 +204,7 @@ def lap_summary(snap: DecisionSnapshot, nl: Optional[NormalizedLap] = None) -> d
         "gap_to_rival_s": _relative_gap(nl),
         "rival_role": _rival_role(nl),
         "position": (nl.position if nl is not None else None),
-        "drs": (nl.drs_available if nl is not None else None),
+        "overtake_mode_eligible": (nl.overtake_mode_eligible if nl is not None else None),
         "our_speed_kmh": (nl.our_speed_kmh if nl is not None else None),
         "lap_status": (nl.lap_status if nl is not None else None),
         "rival_lap_status": (nl.rival_lap_status if nl is not None else None),

@@ -144,7 +144,7 @@ def test_missing_optional_fields_do_not_crash():
             lap=i, total_laps=5, data_mode="REPLAY",
             our_speed_kmh=280.0, our_soc_mj=5.0, our_lap_start_soc_mj=5.0,
             our_lap_energy_deployed_mj=1.5,
-            gap_to_car_ahead_s=None, position=None, sector=None, drs_available=None,
+            gap_to_car_ahead_s=None, position=None, sector=None, overtake_mode_eligible=None,
             energy_is_modeled=True,
         )
         for i in range(1, 6)

@@ -50,7 +50,7 @@ class TelemetrySample(BaseModel):
     brake: Optional[float] = Field(None, ge=0.0, le=1.0)
     rpm: Optional[float] = Field(None, ge=0.0)
     gear: Optional[int] = Field(None, ge=-1, le=8)
-    drs: Optional[bool] = Field(None, description="DRS actually open at this sample")
+    drs: Optional[bool] = Field(None, description="Raw DRS sensor state from historical FastF1 data. In 2026 replay context maps to active aero reduced-drag mode; used internally by normalizer only.")
 
     position: Optional[int] = Field(None, ge=1, description="Track position where available")
     sector: Optional[int] = Field(None, ge=1, le=3)
@@ -128,7 +128,11 @@ class NormalizedLap(BaseModel):
     )
     position: Optional[int] = Field(None, ge=1)
     sector: Optional[int] = Field(None, ge=1, le=3)
-    drs_available: Optional[bool] = None
+    overtake_mode_eligible: Optional[bool] = Field(
+        None,
+        description="True when gap to car ahead <= 1.0 s — eligible for 2026 Overtake Mode. "
+        "In replay mode, derived from historical DRS sensor state as a proxy."
+    )
     lap_status: LapStatus = Field(
         "racing", description="Our car's lap: 'racing' or a pit/out/invalid lap that is not clean evidence"
     )

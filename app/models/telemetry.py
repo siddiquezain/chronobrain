@@ -65,7 +65,7 @@ class TelemetryState(BaseModel):
     tyre_age_laps: int = Field(..., ge=0, description="Tyre age in laps")
     tyre_compound: str = Field(..., description="Tyre compound: SOFT, MEDIUM, or HARD")
 
-    drs_available: bool = Field(..., description="True if DRS is available (within 1s gap)")
+    overtake_mode_eligible: bool = Field(..., description="True when gap <= 1.0 s — 2026 Overtake Mode eligibility (formerly DRS zone)")
     overtake_opportunity: bool = Field(
         ..., description="True if basic overtake conditions are met"
     )

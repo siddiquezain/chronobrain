@@ -88,7 +88,7 @@ class SimulationTelemetrySource(TelemetrySource):
             energy_budget_mj=round(max(0.0, 9.0 - deployed), 3),
             tyre_age_laps=cfg.tyre_age_laps + (self._lap - cfg.current_lap),
             tyre_compound=cfg.tyre_compound,
-            drs_available=gap_ahead < 1.0,
+            overtake_mode_eligible=gap_ahead < 1.0,
             overtake_opportunity=gap_ahead < 1.0 and closing > 3.0,
             track_position=float(np.clip(self._rng.uniform(0, 1), 0, 1)),
             lap_start_soc_mj=round(self._lap_start_soc, 3),

@@ -117,7 +117,7 @@ class SyntheticProvider(TelemetryProvider):
                     gap_to_car_behind_s=tel.gap_to_car_behind_s,
                     position=None,
                     sector=None,
-                    drs_available=(
+                    overtake_mode_eligible=(
                         tel.gap_to_car_ahead_s is not None
                         and tel.gap_to_car_ahead_s < 1.0
                     ),
