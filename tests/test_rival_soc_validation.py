@@ -154,3 +154,68 @@ def test_classification_confusion_matrix_correct():
     # Row 2 = true HIGH: pred HIGH → cm[2][2] = 1
     assert cm[2][2] == 1, f"Expected cm[2][2]=1 (true HIGH, pred HIGH), got cm={cm}"
     assert result.accuracy == pytest.approx(0.5, abs=1e-6)
+
+
+# ── Runner tests (Task 4) ─────────────────────────────────────────────────────
+
+from app.validation.runner import run_validation
+from app.validation.models import ValidationSummary
+
+
+# Test 5: estimator cannot access ground truth during inference
+def test_estimator_cannot_access_ground_truth():
+    """
+    Spec requirement 5: ground truth must never reach the inference path.
+    NormalizedLap has no rival_soc_mj field; SyntheticProvider.ground_truth_rival_soc_by_lap
+    is only read by the validation runner, never by the decision engine.
+    """
+    from app.data.providers import build_provider
+    from app.data.samples import NormalizedLap
+
+    provider = build_provider("synthetic", scenario="B", seed=42, total_laps=5)
+    laps = provider.laps()
+
+    for lap in laps:
+        assert isinstance(lap, NormalizedLap)
+        # NormalizedLap must not carry rival ground-truth SoC
+        assert not hasattr(lap, "rival_soc_mj") or lap.rival_soc_mj is None, \
+            f"Ground truth leaked into NormalizedLap at lap {lap.lap}"
+        # The four kinematic observables are OK; the hidden SoC is not
+        assert lap.our_soc_mj is not None  # own SoC is modeled (not rival gt)
+
+
+# Test 6: validation results are deterministic
+def test_validation_results_deterministic():
+    """Spec requirement 6: same scenario + seed → identical validation results."""
+    r1 = run_validation(scenario="B", seed=42, total_laps=20)
+    r2 = run_validation(scenario="B", seed=42, total_laps=20)
+    assert r1.rival_soc.mae_mj == r2.rival_soc.mae_mj
+    assert r1.rival_soc.rmse_mj == r2.rival_soc.rmse_mj
+    assert r1.rival_soc.sample_count == r2.rival_soc.sample_count
+    assert r1.rival_classification.accuracy == r2.rival_classification.accuracy
+
+
+# Test 7: different scenarios produce independently calculated metrics
+def test_different_scenarios_produce_independent_metrics():
+    """Spec requirement 7: different scenarios → independently calculated metrics."""
+    r_b = run_validation(scenario="B", seed=42, total_laps=20)
+    r_c = run_validation(scenario="C", seed=42, total_laps=20)
+    # B has high SoC (7.2 MJ); C has very low SoC (1.8 MJ)
+    assert r_b.scenario == "B"
+    assert r_c.scenario == "C"
+    assert r_b.rival_soc.ground_truth_available is True
+    assert r_c.rival_soc.ground_truth_available is True
+    assert r_b.rival_soc.sample_count == r_c.rival_soc.sample_count == 20
+
+
+# Test 10: synthetic validation is labeled controlled/synthetic
+def test_synthetic_validation_is_labeled_controlled():
+    """Spec requirement 10: synthetic validation is explicitly labeled synthetic/controlled."""
+    result = run_validation(scenario="B", seed=42, total_laps=10)
+    assert result.rival_soc.validation_type == "controlled_hidden_state"
+    assert result.rival_classification.validation_type == "controlled_hidden_state"
+    assert result.ground_truth_available is True
+    # Note must say MODELED — NOT MEASURED
+    assert "MODELED" in result.rival_soc.evaluation_note.upper()
+    # Honesty notice must be present
+    assert "NOT MEASURED" in result.rival_soc.honesty_notice.upper()
