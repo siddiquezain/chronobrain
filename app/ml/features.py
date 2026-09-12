@@ -1,34 +1,46 @@
-"""Feature extraction for the overtake success classifier."""
+"""
+Feature vector for the overtake-success classifier.
+
+Every feature is genuinely computed from a `NormalizedLap` and the event-time
+window — no hardcoded placeholders. Order here is the contract: training,
+inference, and the metadata sidecar all use it.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
 
 import numpy as np
 
-from app.models.telemetry import TelemetryState
-
-# Canonical 8 features — order must match training
+# Canonical feature order. Change here => retrain (train.py writes it to metadata,
+# predict.py checks the width).
 FEATURE_NAMES = [
-    "gap_to_car_ahead_s",
-    "closing_speed_mps",
-    "slipstream_factor",
-    "soc_mj",
-    "tyre_age_laps",
-    "straight_distance_m",
-    "speed_kmh",
-    "drs_available",
+    "gap_to_car_ahead_s",       # smaller = better
+    "gap_trend_s_per_lap",      # negative = closing on the car ahead
+    "our_soc_mj",               # energy available to spend
+    "our_speed_kmh",            # pace
+    "overtake_mode_eligible",   # 0 / 1 (2026 Overtake Mode eligibility: gap <= 1.0 s)
+    "rival_terminal_speed_kmh", # lower = a slower / fading car ahead
 ]
 
+_GAP_MISSING = 3.5
+_RIVAL_SPEED_MISSING = 320.0
 
-def extract(telemetry: TelemetryState) -> np.ndarray:
-    """Return shape (1, 8) feature array from a TelemetryState."""
-    return np.array(
-        [[
-            telemetry.gap_to_car_ahead_s or 3.0,
-            telemetry.closing_speed_mps,
-            telemetry.slipstream_factor,
-            telemetry.soc_mj,
-            telemetry.tyre_age_laps,
-            telemetry.straight_distance_m,
-            telemetry.speed_kmh,
-            float(telemetry.drs_available),
-        ]],
-        dtype=np.float64,
-    )
+
+def build_features(
+    gap_to_car_ahead_s: Optional[float],
+    gap_trend_s_per_lap: Optional[float],
+    our_soc_mj: float,
+    our_speed_kmh: float,
+    overtake_mode_eligible: Optional[bool],
+    rival_terminal_speed_kmh: Optional[float],
+) -> np.ndarray:
+    """Return a (1, 6) float array in FEATURE_NAMES order. Unknowns -> neutral."""
+    return np.array([[
+        _GAP_MISSING if gap_to_car_ahead_s is None else float(gap_to_car_ahead_s),
+        0.0 if gap_trend_s_per_lap is None else float(gap_trend_s_per_lap),
+        float(our_soc_mj),
+        float(our_speed_kmh),
+        1.0 if overtake_mode_eligible else 0.0,
+        _RIVAL_SPEED_MISSING if rival_terminal_speed_kmh is None else float(rival_terminal_speed_kmh),
+    ]], dtype=np.float64)

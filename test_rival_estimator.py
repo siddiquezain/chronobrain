@@ -161,3 +161,69 @@ class TestSyntheticRecovery:
         e2 = run(42)
         assert e1.mean_soc_mj == e2.mean_soc_mj
         assert e1.std_soc_mj == e2.std_soc_mj
+
+
+class TestNotOverconfident:
+    """
+    Regression: the SIR filter used to collapse to a near-zero std and a
+    systematic low bias. Roughening + widened observation noise + a std floor +
+    a near-neutral drift fix that. These are calibration-free sanity bounds, not
+    an accuracy claim.
+    """
+
+    def _obs_for(self, soc, rng):
+        frac = soc / 9.0
+        return RivalObservation(
+            terminal_speed_kmh=float(290 + frac * 65 + rng.normal(0, 3)),
+            clipping_point_fraction=float(np.clip(0.3 + frac * 0.5 + rng.normal(0, 0.03), 0, 1)),
+            corner_exit_accel_g=float(1.0 + frac * 0.3 + rng.normal(0, 0.05)),
+            sector_delta_s=float(-frac * 0.4 + rng.normal(0, 0.05)),
+        )
+
+    def test_single_observation_does_not_collapse_the_posterior(self):
+        est = RivalStateEstimator(seed=42)
+        est.predict()
+        est.update(make_observation(terminal_speed_kmh=295.0, clipping_point_fraction=0.35))
+        assert est.estimate().std_soc_mj >= 0.35  # the floor
+
+    def test_std_never_below_floor_even_after_many_observations(self):
+        est = RivalStateEstimator(seed=42)
+        obs = make_observation(terminal_speed_kmh=310.0)
+        for _ in range(30):
+            est.predict()
+            est.update(obs)
+        assert est.estimate().std_soc_mj >= 0.35
+
+    def test_high_soc_rival_is_not_dragged_low(self):
+        """Old drift of -0.5 MJ/lap biased every estimate downward."""
+        est = RivalStateEstimator(seed=3)
+        rng = np.random.default_rng(11)
+        for _ in range(25):
+            est.predict()
+            est.update(self._obs_for(7.0, rng))
+        r = est.estimate()
+        assert abs(r.mean_soc_mj - 7.0) < 1.0
+
+    def test_tracks_a_changing_hidden_soc(self):
+        """Mean should follow a rival whose SoC genuinely falls over a stint."""
+        est = RivalStateEstimator(seed=5)
+        rng = np.random.default_rng(9)
+        for _ in range(12):
+            est.predict()
+            est.update(self._obs_for(7.5, rng))
+        high = est.estimate().mean_soc_mj
+        for _ in range(12):
+            est.predict()
+            est.update(self._obs_for(3.0, rng))
+        low = est.estimate().mean_soc_mj
+        assert low < high - 1.5
+
+    def test_still_deterministic_after_the_changes(self):
+        obs = make_observation()
+        def run():
+            est = RivalStateEstimator(seed=42)
+            for _ in range(15):
+                est.predict()
+                est.update(obs)
+            return est.estimate().model_dump()
+        assert run() == run()

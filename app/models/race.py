@@ -18,7 +18,7 @@ class RaceState(BaseModel):
     tyre_compound: str
     tyre_age_laps: int
     sector: int
-    drs_available: bool
+    overtake_mode_eligible: bool
 
 
 class RaceStateUpdate(BaseModel):
@@ -34,6 +34,6 @@ class RaceStateUpdate(BaseModel):
     tyre_compound: Optional[str] = None
     tyre_age_laps: Optional[int] = None
     sector: Optional[int] = None
-    drs_available: Optional[bool] = None
+    overtake_mode_eligible: Optional[bool] = None
     overtake_qualified_last_lap: Optional[bool] = None
     lap_energy_deployed_mj: Optional[float] = None

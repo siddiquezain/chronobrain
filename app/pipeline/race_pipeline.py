@@ -48,7 +48,7 @@ def run(raw_telemetry: dict[str, Any]) -> dict:
         "tyre_compound": telemetry.tyre_compound,
         "tyre_age_laps": telemetry.tyre_age_laps,
         "sector": telemetry.sector,
-        "drs_available": telemetry.drs_available,
+        "overtake_mode_eligible": telemetry.overtake_mode_eligible,
     }
 
     return {

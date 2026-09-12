@@ -18,7 +18,7 @@ _BASE_TELEMETRY = dict(
     energy_deployment_mj=1.0, energy_harvest_mj=1.5,
     energy_remaining_mj=5.0, energy_budget_mj=8.0,
     tyre_age_laps=15, tyre_compound="MEDIUM",
-    drs_available=False, overtake_opportunity=False,
+    overtake_mode_eligible=False, overtake_opportunity=False,
     track_position=0.5,
     lap_start_soc_mj=5.0, overtake_qualified_last_lap=False,
 )

@@ -14,6 +14,12 @@ Key design decisions:
   Must be .spawn(5) — a leftover 4 would silently corrupt the newest mode's stream.
 - ModeDynamics priors are ENGINEERED, NOT MEASURED from real car data. Never present
   numeric output as validated without repeating this caveat.
+- The prior is only the STARTING point of each draw. `_simulate_mode` then adjusts
+  it by live race state from `PlanningContext` (gap to the car ahead/behind, own
+  modelled SoC, opportunity strength, rival energy estimate) so the same planner
+  gives different outcomes as the situation changes — and so a mode cannot rank
+  first on a favourable static prior when there is nothing to gain from it. Those
+  adjustment coefficients (`PlannerConfig`) are ENGINEERED laptime-equivalents too.
 """
 
 from __future__ import annotations
@@ -104,11 +110,44 @@ class PlannerConfig:
     failed_overtake_penalty_s: float = 0.4
     # Deliberately modest — single noisy rival estimate shouldn't swing outcomes much
     defense_penalty_weight: float = 0.3
+    # Cap the rival std used inside the planner's Monte Carlo sampling so that a
+    # wider Z-score posterior (honest uncertainty) does not inflate the planner's
+    # laptime CI and trigger the stat/prac gate. The confidence gate already gates
+    # on rival uncertainty separately via rival_confidence_threshold_mj.
+    # ponytail: 1.2 MJ matches the old absolute-model typical floor; revisit with real data.
+    planner_rival_soc_std_cap_mj: float = 1.2
     # Uncertainty growth per lap of lookahead — makes WAIT_5 less confident than WAIT_2
     horizon_uncertainty_growth: float = 0.15
     taper_normal_start_kmh: float = 290.0
     taper_normal_end_kmh: float = 355.0
     taper_overtake_full_power_end_kmh: float = 337.0
+
+    # --- live-state responsiveness (all ENGINEERED laptime-equivalents, MODEL_ASSUMPTION) ---
+    # A car within `in_range_plateau_s` is fully attackable/defendable (matches the
+    # 1.0 s overtake-proximity rule); the mode-specific benefit then fades linearly
+    # to zero by `target_range_s`, and is zero when there is no car on that side.
+    in_range_plateau_s: float = 1.0
+    target_range_s: float = 3.0
+    # Strategic laptime-equivalent price (s per MJ) of spending ERS with NO
+    # positional payoff (no target in range, not defending). Not a physical lap
+    # delta — it is what stops an attack/PUSH mode ranking first on raw deployment
+    # pace when there is nothing to gain, so an infeasible-in-context mode cannot
+    # dominate the final decision on a static prior alone.
+    unrewarded_energy_price_s_per_mj: float = 0.7
+    # How much a low own-SoC erodes a deployment-heavy mode's pace (s per MJ of the
+    # mode's own energy cost, scaled by the SoC deficit fraction).
+    low_soc_pace_erosion_s_per_mj: float = 0.18
+    # Value (s) of PUSH_MODE when it is actually defending a car within range.
+    defensive_push_value_s: float = 0.3
+
+    # --- shared energy-economics constants (canonical home; MODEL_ASSUMPTION) ---
+    # Mirrors app.decision.actions.FeasibilityInput.harvest_per_lap_mj /
+    # attack_cost_mj. Kept in sync manually (both are illustrative energy-policy
+    # constants, not measured) — the Opportunity Horizon reads THESE fields rather
+    # than defining its own separate numbers, so there is exactly one place each
+    # concept is defined for the Stage-2/Horizon boundary.
+    harvest_per_lap_mj: float = 0.3
+    attack_cost_mj: float = 1.6
 
 
 @dataclass
@@ -117,10 +156,27 @@ class PlanningContext:
     Context fed into Stage 2 alongside the legal modes.
     Does NOT carry overtake_qualified_last_lap — that belongs exclusively to
     Stage 1's legal_modes output; duplicating here creates two sources of truth.
+
+    Every field below is a LIVE race-state input; supplying them makes each mode's
+    simulated outcome respond to the current situation (see `_simulate_mode`).
+    With no fields set the planner treats it as "no car in range, own energy
+    unknown" — an attack/PUSH mode then earns no overtake payoff, so it cannot
+    rank first on its static prior alone. Output is deterministic either way.
     """
 
     gap_to_car_ahead_s: Optional[float] = None
     rival_soc_estimate: Optional[RivalSocEstimate] = None
+    # Optional scalar probability the rival will actively defend (0..1), estimated
+    # deterministically upstream from observable behaviour. None -> not modelled,
+    # behaviour byte-identical to before this field existed.
+    p_defend: Optional[float] = None
+    # rearward gap — PUSH_MODE's defensive rationale
+    gap_to_car_behind_s: Optional[float] = None
+    # our own modelled SoC and the policy "comfortable" reserve
+    own_soc_mj: Optional[float] = None
+    low_reserve_mj: float = 2.0
+    # current single-lap overtake-opportunity strength (0..1), e.g. ml_overtake_prob
+    opportunity_strength: Optional[float] = None
 
 
 class ModeProjection(BaseModel):
@@ -129,7 +185,21 @@ class ModeProjection(BaseModel):
         ..., description="Mean laptime delta vs BALANCED baseline (s). Negative = faster."
     )
     std_laptime_delta_s: float
-    overtake_probability: float = Field(..., ge=0.0, le=1.0)
+    overtake_probability: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="LEGACY NAME, kept for API compatibility: mean(samples < 0) — "
+        "P(this mode nets faster than the BALANCED baseline), NOT literally "
+        "P(overtake completes). For CONSERVE/BALANCED (no overtake attempt) this "
+        "is ~0.5 from Gaussian noise alone. Use attack_completion_probability for "
+        "the semantically-correct metric on modes that actually attempt a pass.",
+    )
+    attack_completion_probability: Optional[float] = Field(
+        None, ge=0.0, le=1.0,
+        description="P(the simulated overtake attempt itself succeeds) — mean of "
+        "the per-iteration Bernoulli success draw. None for CONSERVE/BALANCED "
+        "(no attempt is modelled). This is the correctly-named replacement metric; "
+        "overtake_probability is retained unchanged for backward compatibility.",
+    )
     sharpe_ratio: float = Field(
         ..., description="Risk-adjusted metric. Capped at ±999 when variance near zero."
     )
@@ -142,6 +212,16 @@ class PlannerResult(BaseModel):
         ..., description="Legal modes ranked best-first (lowest mean delta)"
     )
     recommended_mode: DeploymentMode
+    runner_up_mode: Optional[DeploymentMode] = Field(
+        None, description="Second-ranked legal mode, if any — counterfactual companion "
+        "to recommended_mode (mirrors OpportunityBlock.foregone_strategy at the "
+        "Horizon layer)."
+    )
+    mode_value_gap_s: float = Field(
+        0.0, description="mean_laptime_delta_s(runner_up) - mean_laptime_delta_s(recommended) "
+        "— how much better the recommended mode is than the best alternative (s). "
+        "Always >= 0 since modes are ranked best-first."
+    )
     n_iterations: int
 
 
@@ -196,7 +276,7 @@ class MonteCarloPlanner:
             dyn = self.dynamics[mode]
             rng = streams[mode]
 
-            samples = self._simulate_mode(mode, dyn, ctx, rng)
+            samples, completion_prob = self._simulate_mode(mode, dyn, ctx, rng)
             self._raw_samples[(run_id, mode)] = samples
 
             mean = float(np.mean(samples))
@@ -214,6 +294,9 @@ class MonteCarloPlanner:
                     mean_laptime_delta_s=round(mean, 6),
                     std_laptime_delta_s=round(std, 6),
                     overtake_probability=round(float(np.mean(samples < 0)), 4),
+                    attack_completion_probability=(
+                        round(completion_prob, 4) if completion_prob is not None else None
+                    ),
                     sharpe_ratio=round(sharpe, 4),
                     energy_cost_mj=dyn.energy_cost_mj,
                 )
@@ -224,13 +307,32 @@ class MonteCarloPlanner:
         recommended = (
             projections[0].mode if projections else DeploymentMode.BALANCED_MODE
         )
+        runner_up = projections[1].mode if len(projections) > 1 else None
+        value_gap = (
+            round(projections[1].mean_laptime_delta_s - projections[0].mean_laptime_delta_s, 6)
+            if len(projections) > 1 else 0.0
+        )
 
         return PlannerResult(
             run_id=run_id,
             ranked_modes=projections,
             recommended_mode=recommended,
+            runner_up_mode=runner_up,
+            mode_value_gap_s=value_gap,
             n_iterations=cfg.n_iterations,
         )
+
+    @staticmethod
+    def _range_factor(gap: Optional[float], plateau_s: float, range_s: float) -> float:
+        """1.0 for a car within `plateau_s`, fading linearly to 0.0 by `range_s`,
+        and 0.0 when there is no car on that side (`gap is None`)."""
+        if gap is None:
+            return 0.0
+        if gap <= plateau_s:
+            return 1.0
+        if gap >= range_s:
+            return 0.0
+        return 1.0 - (gap - plateau_s) / (range_s - plateau_s)
 
     def _simulate_mode(
         self,
@@ -238,20 +340,67 @@ class MonteCarloPlanner:
         dyn: ModeDynamics,
         ctx: PlanningContext,
         rng: np.random.Generator,
-    ) -> np.ndarray:
-        """Simulate n_iterations laptime draws for one mode."""
+    ) -> tuple[np.ndarray, Optional[float]]:
+        """
+        Simulate n_iterations laptime draws for one mode.
+
+        The base draw is the mode's engineered prior. It is then adjusted by LIVE
+        race state so that the SAME planner produces DIFFERENT outcomes as the
+        situation changes:
+          * an attack/PUSH mode only realises its overtake payoff if there is a
+            car within range (ahead to attack, or behind for PUSH to defend);
+          * opportunity strength and the rival energy estimate scale the realised
+            success rate;
+          * ERS spent with no positional payoff carries a strategic laptime price
+            (this is what stops a static-prior mode from dominating out of context);
+          * a low own-SoC erodes a deployment-heavy mode's pace;
+          * PUSH gains real value when it is genuinely defending.
+        Deterministic given the mode's RNG stream regardless of context.
+        """
         cfg = self.config
         n = cfg.n_iterations
 
         samples = rng.normal(dyn.mean_laptime_delta_s, dyn.std_laptime_delta_s, n)
+        completion_prob: Optional[float] = None
+
+        target_ahead = self._range_factor(
+            ctx.gap_to_car_ahead_s, cfg.in_range_plateau_s, cfg.target_range_s
+        )
+        defending = (
+            self._range_factor(ctx.gap_to_car_behind_s, cfg.in_range_plateau_s, cfg.target_range_s)
+            if mode == DeploymentMode.PUSH_MODE
+            else 0.0
+        )
+        payoff = max(target_ahead, defending)  # how much of this mode's rationale applies now
 
         if dyn.overtake_success_prob > 0:
             eff_prob = self._effective_overtake_prob(mode, dyn, ctx, rng, n)
+            if ctx.opportunity_strength is not None:
+                eff_prob = eff_prob * (0.5 + 0.5 * float(np.clip(ctx.opportunity_strength, 0.0, 1.0)))
+            eff_prob = eff_prob * payoff  # no car in range -> payoff cannot be realised
             success = rng.random(n) < eff_prob
+            # attack_completion_probability: the correctly-named metric — mean of
+            # the actual per-iteration success draw, not "P(net faster than 0)".
+            completion_prob = float(np.mean(success))
             samples -= success * cfg.overtake_gap_max_bonus
             samples += (~success) * cfg.failed_overtake_penalty_s * (eff_prob > 0).astype(float)
 
-        return samples
+        # ERS spent with no positional payoff has a strategic laptime-equivalent price
+        if dyn.energy_cost_mj > 0:
+            samples = samples + (1.0 - payoff) * dyn.energy_cost_mj * cfg.unrewarded_energy_price_s_per_mj
+
+        # a low own-SoC erodes a deployment-heavy mode's realisable pace (lift & coast)
+        if dyn.energy_cost_mj > 0 and ctx.own_soc_mj is not None and ctx.low_reserve_mj > 0:
+            deficit = float(
+                np.clip((ctx.low_reserve_mj - ctx.own_soc_mj) / ctx.low_reserve_mj, 0.0, 1.0)
+            )
+            samples = samples + deficit * dyn.energy_cost_mj * cfg.low_soc_pace_erosion_s_per_mj
+
+        # PUSH is genuinely worth its energy when it is defending a car within range
+        if mode == DeploymentMode.PUSH_MODE and defending > 0.0:
+            samples = samples - defending * cfg.defensive_push_value_s
+
+        return samples, completion_prob
 
     def _effective_overtake_prob(
         self,
@@ -271,15 +420,19 @@ class MonteCarloPlanner:
         if ctx.rival_soc_estimate is not None and mode in (
             DeploymentMode.ARM_OVERTAKE_MODE,
             DeploymentMode.USE_OVERTAKE_BONUS_MODE,
+            DeploymentMode.PUSH_MODE,
         ):
             rival_soc = rng.normal(
                 ctx.rival_soc_estimate.mean_soc_mj,
-                ctx.rival_soc_estimate.std_soc_mj,
+                min(ctx.rival_soc_estimate.std_soc_mj, cfg.planner_rival_soc_std_cap_mj),
                 n,
             )
             rival_soc = np.clip(rival_soc, 0.0, _DEFAULT_GATE_CONFIG.max_deployment_per_lap_mj)
             defense_factor = rival_soc / _DEFAULT_GATE_CONFIG.max_deployment_per_lap_mj
             eff_prob = base_prob - cfg.defense_penalty_weight * defense_factor
+            if ctx.p_defend is not None:
+                # explicit behavioural signal, on top of the SoC-derived defense factor
+                eff_prob = eff_prob - cfg.defense_penalty_weight * float(ctx.p_defend)
             return np.clip(eff_prob, 0.0, 1.0)
 
         return np.full(n, base_prob)

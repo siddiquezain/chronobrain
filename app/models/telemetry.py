@@ -50,7 +50,7 @@ class TelemetryState(BaseModel):
     soc_mj: float = Field(..., ge=0.0, le=9.0, description="Battery SoC (MJ)")
     soc_pct: float = Field(..., ge=0.0, le=100.0, description="Battery SoC as percentage")
     energy_deployment_mj: float = Field(
-        ..., ge=0.0, description="MGU-K energy deployed this lap so far (MJ). Art. 5.4.10."
+        ..., ge=0.0, description="MGU-K energy deployed this lap so far (MJ). Tracked against the per-lap deployment cap."
     )
     energy_harvest_mj: float = Field(
         ..., ge=0.0, description="MGU-K energy harvested this lap so far (MJ)"
@@ -59,13 +59,13 @@ class TelemetryState(BaseModel):
         ..., ge=0.0, description="Usable energy remaining (MJ)"
     )
     energy_budget_mj: float = Field(
-        ..., ge=0.0, description="Remaining deployment budget before Art.5.4.10 cap (MJ)"
+        ..., ge=0.0, description="Remaining deployment budget before the per-lap cap (MJ)"
     )
 
     tyre_age_laps: int = Field(..., ge=0, description="Tyre age in laps")
     tyre_compound: str = Field(..., description="Tyre compound: SOFT, MEDIUM, or HARD")
 
-    drs_available: bool = Field(..., description="True if DRS is available (within 1s gap)")
+    overtake_mode_eligible: bool = Field(..., description="True when gap <= 1.0 s — 2026 Overtake Mode eligibility (formerly DRS zone)")
     overtake_opportunity: bool = Field(
         ..., description="True if basic overtake conditions are met"
     )
