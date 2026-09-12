@@ -52,6 +52,7 @@ from app.decision.snapshot import (
     ComplianceCheck,
     ConfidenceBlock,
     ConstraintsBlock,
+    CounterfactualBlock,
     DataQualityBlock,
     DecisionBlock,
     DecisionSnapshot,
@@ -663,6 +664,51 @@ def _horizon_prefers_wait(ctx: DecisionContext, margin_mult: float = 1.0) -> tup
 # ===========================================================================
 # assemble snapshot
 # ===========================================================================
+def _build_counterfactual(planner_result, decision_block) -> Optional[CounterfactualBlock]:
+    """Build counterfactual from planner runner-up data. None if < 2 ranked modes."""
+    try:
+        ranked = planner_result.ranked_modes
+        if not ranked or len(ranked) < 2:
+            return None
+
+        top = ranked[0]
+        runner_up = ranked[1]
+
+        recommended_action = decision_block.action
+        counterfactual_action = runner_up.mode.value if hasattr(runner_up.mode, "value") else str(runner_up.mode)
+
+        gain_delta = max(0.0, float(planner_result.mode_value_gap_s))
+
+        energy_rec = float(getattr(top, "energy_cost_mj", 0.0))
+        energy_cf = float(getattr(runner_up, "energy_cost_mj", 0.0))
+
+        future_impact = "SIMILAR"
+        if energy_rec > energy_cf + 0.5:
+            future_impact = "WORSE"
+        elif energy_rec < energy_cf - 0.5:
+            future_impact = "BETTER"
+
+        diff_s = abs(gain_delta)
+        summary = (
+            f"{recommended_action} nets {diff_s:.3f}s better than {counterfactual_action} "
+            f"({energy_rec:.1f} MJ vs {energy_cf:.1f} MJ energy cost)."
+        )
+
+        return CounterfactualBlock(
+            recommended_action=recommended_action,
+            counterfactual_action=counterfactual_action,
+            recommended_expected_gain_s=float(top.mean_laptime_delta_s),
+            counterfactual_expected_gain_s=float(runner_up.mean_laptime_delta_s),
+            gain_delta_s=gain_delta,
+            energy_cost_recommended_mj=energy_rec,
+            energy_cost_counterfactual_mj=energy_cf,
+            future_opportunity_impact=future_impact,
+            summary=summary,
+        )
+    except Exception:
+        return None
+
+
 def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
     nl = ctx.target_lap
     e = ctx.energy
@@ -832,6 +878,8 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         override_reason=cgr.override_reason,
     )
 
+    counterfactual = _build_counterfactual(pr, decision_block)
+
     meta = SnapshotMeta(
         lap=nl.lap, total_laps=nl.total_laps, data_mode=nl.data_mode,
         source_detail=source_detail, seed=ctx.seed,
@@ -852,6 +900,7 @@ def _assemble(ctx: DecisionContext, source_detail: str) -> DecisionSnapshot:
         compliance=compliance_block,
         confidence=confidence_block,
         constraints=constraints_block,
+        counterfactual=counterfactual,
         candidate_actions=list(ctx.candidate_actions),
         feasible_actions=list(ctx.feasible_actions),
         rejected_alternatives=[RejectedAlternative(**r) for r in ctx.rejected_alternatives],

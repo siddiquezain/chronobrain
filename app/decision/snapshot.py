@@ -219,6 +219,34 @@ class MonteCarloBlock(BaseModel):
     )
 
 
+class CounterfactualBlock(BaseModel):
+    """What would happen if we did NOT choose the recommended action."""
+    recommended_action: str = Field(..., description="The action the engine recommends")
+    counterfactual_action: str = Field(..., description="The next-best alternative (what we forego)")
+    recommended_expected_gain_s: float = Field(
+        ..., description="Expected laptime delta of the recommended mode (s, negative = faster than BALANCED baseline)"
+    )
+    counterfactual_expected_gain_s: float = Field(
+        ..., description="Expected laptime delta of the foregone mode (s)"
+    )
+    gain_delta_s: float = Field(
+        ..., description="How much better the recommended mode is vs. the counterfactual (s, >= 0)"
+    )
+    energy_cost_recommended_mj: float = Field(
+        0.0, description="Energy cost of the recommended mode (MJ)"
+    )
+    energy_cost_counterfactual_mj: float = Field(
+        0.0, description="Energy cost of the foregone mode (MJ)"
+    )
+    future_opportunity_impact: str = Field(
+        "SIMILAR",
+        description="BETTER | SIMILAR | WORSE — how choosing the counterfactual affects future windows"
+    )
+    summary: str = Field(
+        "", description="One-line human explanation of why the recommendation beats the alternative"
+    )
+
+
 class ComplianceCheck(BaseModel):
     rule: str
     provenance: str = Field(..., description="VERIFIED_FIA | MODEL_ASSUMPTION | DEMO_CONSTANT")
@@ -277,6 +305,10 @@ class DecisionSnapshot(BaseModel):
     compliance: ComplianceBlock
     confidence: ConfidenceBlock
     constraints: ConstraintsBlock
+    counterfactual: Optional[CounterfactualBlock] = Field(
+        None, description="What would happen if the recommended action is NOT taken. "
+        "None when there is only one feasible mode (no comparison possible)."
+    )
     candidate_actions: List[str]
     feasible_actions: List[str]
     rejected_alternatives: List[RejectedAlternative]
