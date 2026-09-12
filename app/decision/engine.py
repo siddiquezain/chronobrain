@@ -665,6 +665,41 @@ def _horizon_prefers_wait(ctx: DecisionContext, margin_mult: float = 1.0) -> tup
 # ===========================================================================
 # assemble snapshot
 # ===========================================================================
+def _compute_cause_attribution(
+    compound_baseline_active: bool,
+    active_aero_mode: str,
+    residual_evidence_confidence: str,
+) -> dict:
+    """
+    Heuristic evidence attribution: estimated contribution of each contextual factor
+    to the observed rival pace delta.
+
+    MODEL_ASSUMPTION — not causal certainty. Modelled proportions of evidence weight:
+    - tyre: tyre compound always contributes; more when compound-stratified baseline active
+    - energy: scaled by how strong the residual energy evidence signal is
+    - traffic_aero: elevated when in overtake-eligible (close-following) zone
+    - other: remainder (weather, circuit baseline, driver behaviour, unattributed)
+
+    Returns a dict summing to 1.0.
+    """
+    tyre = 0.35 + (0.15 if compound_baseline_active else 0.0)
+    traffic_aero = 0.12 if active_aero_mode == "OVERTAKE_ELIGIBLE" else 0.05
+    energy = {
+        "HIGH": 0.35,
+        "MEDIUM": 0.25,
+        "LOW": 0.15,
+        "UNAVAILABLE": 0.10,
+    }.get(residual_evidence_confidence, 0.10)
+    other = max(0.0, 1.0 - tyre - energy - traffic_aero)
+    total = tyre + energy + traffic_aero + other
+    return {
+        "tyre": round(tyre / total, 3),
+        "energy": round(energy / total, 3),
+        "traffic_aero": round(traffic_aero / total, 3),
+        "other": round(other / total, 3),
+    }
+
+
 def _build_context_attribution(nl, rival_soc_estimate) -> Optional[ContextAttributionBlock]:
     """Build context attribution block from the last lap and rival estimate."""
     try:
@@ -705,6 +740,11 @@ def _build_context_attribution(nl, rival_soc_estimate) -> Optional[ContextAttrib
         else:
             note = "Rival tyre compound unavailable; pooled baseline used for context attribution."
 
+        cause_attr = _compute_cause_attribution(
+            compound_baseline_active=compound_baseline_active,
+            active_aero_mode=active_aero,
+            residual_evidence_confidence=residual_confidence,
+        )
         return ContextAttributionBlock(
             rival_tyre_compound=rival_compound,
             compound_baseline_active=compound_baseline_active,
@@ -712,6 +752,7 @@ def _build_context_attribution(nl, rival_soc_estimate) -> Optional[ContextAttrib
             context_explained_note=note,
             active_aero_mode=active_aero,
             residual_evidence_confidence=residual_confidence,
+            cause_attribution=cause_attr,
         )
     except Exception:
         return None

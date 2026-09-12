@@ -286,6 +286,15 @@ class ContextAttributionBlock(BaseModel):
         description="HIGH | MEDIUM | LOW | UNAVAILABLE — confidence that the residual "
         "(after context attribution) reflects rival energy management."
     )
+    cause_attribution: Optional[dict] = Field(
+        None,
+        description=(
+            "Estimated evidence attribution for the rival's observed pace delta. "
+            "{'tyre': float, 'energy': float, 'traffic_aero': float, 'other': float} — "
+            "values sum to 1.0. "
+            "Modelled proportions, NOT causal certainty. MODEL_ASSUMPTION."
+        ),
+    )
 
 
 class ComplianceCheck(BaseModel):
