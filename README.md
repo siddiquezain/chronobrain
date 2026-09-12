@@ -140,7 +140,100 @@ curl -s -X POST localhost:8000/api/v1/replay/historical \
 - [docs/methodology.md](docs/methodology.md) — the algorithms
 - [docs/regulation.md](docs/regulation.md) — every regulatory constant + provenance
 
-## Environment
+## 2026 F1 Architecture
+
+```
+TELEMETRY (FastF1 historical replay / Synthetic)
+         |
+TELEMETRY NORMALIZER
+         |
+  +------+-------+
+  |      |       |
+OUR    RIVAL   RACE
+ENERGY INTEL   CONTEXT
+       (Particle Active Aero
+        Filter + Overtake Mode
+        RF Model)
+  +------+-------+
+         |
+OPPORTUNITY ENGINE (now / +1 / +2 / +3/+5)
+         |
+REGULATORY GATE (2026 FIA feasibility)
+         |
+MONTE CARLO PLANNER (10,000 seeded rollouts/mode)
+         |
+CONFIDENCE / SIGNIFICANCE GATE (5 gates)
+         |
+DECISION ENGINE → DecisionSnapshot
+         |
+LLM NARRATOR (explanation only, never alters decisions)
+```
+
+## 2026 F1 Terminology
+
+- **DRS abolished**: the 2026 Active Aero system replaces it.
+- **Overtake Mode**: activates when gap to car ahead ≤ 1.0 s — grants +0.5 MJ extra deployable energy.
+- **5 Deployment Modes**: CONSERVE_MODE, BALANCED_MODE, ARM_OVERTAKE_MODE, USE_OVERTAKE_BONUS_MODE, PUSH_MODE.
+- **Rival energy**: always INFERRED via particle filter — F1 teams do not publish battery SoC.
+
+## Important Assumptions
+
+- **Energy is MODELED**: ChronoPace reconstructs SoC from throttle/deployment traces. Not measured.
+- **Rival energy is INFERRED**: particle-filter estimate from observable kinematics. Not measured.
+- **ML training data is SYNTHETIC**: structural domain knowledge, not real F1 outcome data.
+- **FastF1 provider uses historical data** (pre-2026 races replayed as 2026 proxies).
+
+## Environment Setup
+
+```bash
+pip install -r requirements.txt
+export ANTHROPIC_API_KEY=your_key  # optional, for LLM narration
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
 Copy `.env.example` to `.env`:
 - `ANTHROPIC_API_KEY` — optional; enables Claude narration (explanation only)
+
+## API Contract
+
+`POST /api/v1/decision` returns a `DecisionSnapshot` with:
+
+| Block | Description |
+|-------|-------------|
+| `decision` | Final mode, action, confidence |
+| `energy` | Our SoC, deployment headroom, projections |
+| `rival` | Inferred rival energy distribution (INFERRED) |
+| `opportunity` | Multi-lap strategy comparison |
+| `monte_carlo` | 10,000 seeded rollouts per mode |
+| `compliance` | FIA 2026 regulatory check |
+| `confidence` | 5-gate significance check |
+| `counterfactual` | What if we don't act? |
+| `context_attribution` | Tyre compound + active aero attribution |
+| `narrative` | Optional LLM explanation (never authoritative) |
+
+## Demo Commands
+
+```bash
+# Health check
+curl http://localhost:8000/api/v1/health
+
+# Scenario B — strong overtake window (gap=0.6s, high SoC, qualified last lap)
+curl -s -X POST http://localhost:8000/api/v1/decision \
+  -H "Content-Type: application/json" \
+  -d '{"source":"synthetic","scenario":"B","seed":42}' | python -m json.tool
+
+# All 5 scenarios
+for SC in A B C D E; do
+  echo "=== Scenario $SC ==="
+  curl -s -X POST http://localhost:8000/api/v1/decision \
+    -H "Content-Type: application/json" \
+    -d "{\"source\":\"synthetic\",\"scenario\":\"$SC\",\"seed\":42}" | \
+    python -c "import json,sys; d=json.load(sys.stdin); print(f'Mode: {d[\"decision\"][\"mode\"]}, Action: {d[\"decision\"][\"action\"]}')"
+done
+
+# With LLM narrative (requires ANTHROPIC_API_KEY)
+curl -s -X POST http://localhost:8000/api/v1/decision \
+  -H "Content-Type: application/json" \
+  -d '{"source":"synthetic","scenario":"B","seed":42,"with_narrative":true}' | \
+  python -c "import json,sys; d=json.load(sys.stdin); print(d.get('narrative','no narrative'))"
+```
